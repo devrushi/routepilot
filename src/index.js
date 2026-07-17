@@ -68,3 +68,11 @@ export {
   VEHICLE_STATUSES,
   VehicleError,
 } from './vehicles.js';
+
+export {
+  createVehicleLookup,
+  normalizeRegistration,
+  normalizeSpecification,
+  resolveFuelDescription,
+  VehicleLookupError,
+} from './vehicle-lookup.js';
