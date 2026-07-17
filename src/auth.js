@@ -6,13 +6,21 @@
 // flow: password -> short-lived MFA challenge token -> TOTP (or recovery
 // code) -> session. Recovery codes are single-use fallbacks stored hashed.
 
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { base32Encode } from './encoding.js';
 import { hashPassword, verifyPassword } from './password.js';
 import { JwtError, signJwt, verifyJwt } from './jwt.js';
 import { generateSecret, keyUri, verifyTOTP } from './totp.js';
+import {
+  BiometricError,
+  isSupportedBiometricAlgorithm,
+  normalizePublicKey,
+  verifyBiometricSignature,
+} from './biometrics.js';
 
 const MFA_CHALLENGE_TYP = 'mfa_challenge';
+const BIOMETRIC_REG_TYP = 'biometric_reg';
+const BIOMETRIC_AUTH_TYP = 'biometric_auth';
 
 export class AuthError extends Error {
   constructor(message, code) {
@@ -51,6 +59,29 @@ function sanitize(user) {
     id: user.id,
     username: user.username,
     mfaEnabled: user.mfa.enabled,
+    biometricEnrolled: Boolean(user.biometrics && user.biometrics.credentials.length > 0),
+  };
+}
+
+function ensureBiometrics(user) {
+  if (!user.biometrics) {
+    user.biometrics = { credentials: [] };
+  }
+  return user.biometrics;
+}
+
+function hasBiometrics(user) {
+  return Boolean(user.biometrics && user.biometrics.credentials.length > 0);
+}
+
+function sanitizeCredential(credential) {
+  return {
+    credentialId: credential.credentialId,
+    algorithm: credential.algorithm,
+    label: credential.label,
+    createdAt: credential.createdAt,
+    lastUsedAt: credential.lastUsedAt,
+    signCount: credential.signCount,
   };
 }
 
@@ -110,6 +141,7 @@ export function createAuthService(config = {}) {
       username,
       passwordHash: await hashPassword(password),
       mfa: { enabled: false, secret: null, pendingSecret: null, recoveryCodes: [] },
+      biometrics: { credentials: [] },
       createdAt: now(),
     };
     await userStore.save(user);
@@ -122,6 +154,59 @@ export function createAuthService(config = {}) {
       challengeSecret,
       { now: nowSeconds(), expiresInSeconds: challengeTtlSeconds },
     );
+  }
+
+  function issueBiometricChallenge(user, typ) {
+    return signJwt(
+      { sub: user.id, typ, jti: randomUUID() },
+      challengeSecret,
+      { now: nowSeconds(), expiresInSeconds: challengeTtlSeconds },
+    );
+  }
+
+  // Verify a signed challenge token: signature, expiry, type and (optionally)
+  // subject. Maps JWT-level failures onto the auth error surface.
+  function verifyChallengeToken(token, expectedTyp, expectedSub) {
+    let payload;
+    try {
+      payload = verifyJwt(token, challengeSecret, { now: nowSeconds() });
+    } catch (err) {
+      if (err instanceof JwtError) {
+        throw new AuthError('Challenge is invalid or expired', 'AUTH_CHALLENGE_INVALID');
+      }
+      throw err;
+    }
+    const allowed = Array.isArray(expectedTyp) ? expectedTyp : [expectedTyp];
+    if (!allowed.includes(payload.typ)) {
+      throw new AuthError('Unexpected challenge type', 'AUTH_CHALLENGE_INVALID');
+    }
+    if (expectedSub != null && payload.sub !== expectedSub) {
+      throw new AuthError('Challenge does not match this user', 'AUTH_CHALLENGE_INVALID');
+    }
+    return payload;
+  }
+
+  // Signed challenges are single-use within their TTL. Tracking consumed `jti`s
+  // (pruned lazily as they expire) blocks replay of a captured signed challenge.
+  const consumedChallenges = new Map();
+  function consumeChallenge(jti, exp) {
+    const current = nowSeconds();
+    for (const [id, expiry] of consumedChallenges) {
+      if (expiry <= current) consumedChallenges.delete(id);
+    }
+    if (!jti) return; // legacy challenges without a jti aren't replay-tracked
+    if (consumedChallenges.has(jti)) {
+      throw new AuthError('Challenge has already been used', 'AUTH_CHALLENGE_REPLAY');
+    }
+    consumedChallenges.set(jti, exp ?? current + challengeTtlSeconds);
+  }
+
+  function asAuthError(err) {
+    // Surface crypto-layer failures with the auth service's error vocabulary.
+    if (err instanceof BiometricError) {
+      return new AuthError(err.message, `AUTH_${err.code}`);
+    }
+    return err;
   }
 
   /**
@@ -269,6 +354,166 @@ export function createAuthService(config = {}) {
     return sanitize(user);
   }
 
+  /**
+   * Begin biometric enrollment for a native mobile client. The app generates a
+   * hardware-backed key pair, then signs the returned challenge with the new
+   * private key to prove possession in confirmBiometricEnrollment.
+   * @returns {Promise<{challenge:string}>}
+   */
+  async function beginBiometricEnrollment(userId) {
+    const user = await userStore.findById(userId);
+    if (!user) throw new AuthError('User not found', 'AUTH_USER_NOT_FOUND');
+    return { challenge: issueBiometricChallenge(user, BIOMETRIC_REG_TYP) };
+  }
+
+  /**
+   * Confirm biometric enrollment: register the device's public key after
+   * verifying it signed the enrollment challenge (proof of possession).
+   * @param {string} userId
+   * @param {object} params
+   * @param {string} params.challenge The challenge from beginBiometricEnrollment.
+   * @param {string} params.credentialId Stable device credential id.
+   * @param {string} params.publicKey PEM or base64url-DER SPKI public key.
+   * @param {string} params.algorithm ES256 | ES384 | Ed25519.
+   * @param {string} params.signature base64url signature over the challenge.
+   * @param {string} [params.label] Human label for the device.
+   * @returns {Promise<object>} Sanitized credential.
+   */
+  async function confirmBiometricEnrollment(userId, params = {}) {
+    const { challenge, credentialId, publicKey, algorithm, signature, label } = params;
+    const user = await userStore.findById(userId);
+    if (!user) throw new AuthError('User not found', 'AUTH_USER_NOT_FOUND');
+    if (!credentialId || typeof credentialId !== 'string') {
+      throw new AuthError('A credentialId is required', 'AUTH_BIOMETRIC_CREDENTIAL');
+    }
+    if (!isSupportedBiometricAlgorithm(algorithm)) {
+      throw new AuthError(`Unsupported biometric algorithm: ${algorithm}`, 'AUTH_BIOMETRIC_ALG');
+    }
+    const payload = verifyChallengeToken(challenge, BIOMETRIC_REG_TYP, user.id);
+
+    let proven;
+    try {
+      proven = verifyBiometricSignature({ publicKey, algorithm, data: challenge, signature });
+    } catch (err) {
+      throw asAuthError(err);
+    }
+    if (!proven) {
+      throw new AuthError('Biometric proof of possession failed', 'AUTH_BIOMETRIC_SIGNATURE');
+    }
+
+    ensureBiometrics(user);
+    if (user.biometrics.credentials.some((c) => c.credentialId === credentialId)) {
+      throw new AuthError('Credential is already enrolled', 'AUTH_BIOMETRIC_EXISTS');
+    }
+    consumeChallenge(payload.jti, payload.exp);
+
+    const credential = {
+      credentialId,
+      // Normalize to PEM so stored keys round-trip regardless of input format.
+      publicKey: normalizePublicKey(publicKey, algorithm),
+      algorithm,
+      label: typeof label === 'string' && label.trim() ? label.trim() : 'mobile device',
+      createdAt: now(),
+      lastUsedAt: null,
+      signCount: 0,
+    };
+    user.biometrics.credentials.push(credential);
+    await userStore.save(user);
+    return sanitizeCredential(credential);
+  }
+
+  /** List a user's enrolled biometric credentials (no key material). */
+  async function listBiometricCredentials(userId) {
+    const user = await userStore.findById(userId);
+    if (!user) throw new AuthError('User not found', 'AUTH_USER_NOT_FOUND');
+    ensureBiometrics(user);
+    return user.biometrics.credentials.map(sanitizeCredential);
+  }
+
+  /** Remove a biometric credential (e.g. a lost or de-registered device). */
+  async function removeBiometricCredential(userId, credentialId) {
+    const user = await userStore.findById(userId);
+    if (!user) throw new AuthError('User not found', 'AUTH_USER_NOT_FOUND');
+    ensureBiometrics(user);
+    const before = user.biometrics.credentials.length;
+    user.biometrics.credentials = user.biometrics.credentials.filter(
+      (c) => c.credentialId !== credentialId,
+    );
+    if (user.biometrics.credentials.length === before) {
+      throw new AuthError('Unknown biometric credential', 'AUTH_BIOMETRIC_CREDENTIAL');
+    }
+    await userStore.save(user);
+    return sanitize(user);
+  }
+
+  /**
+   * Begin a passwordless biometric login for a native client. Returns a
+   * challenge the device signs, plus the credential ids the account can use.
+   * @returns {Promise<{challenge:string, credentialIds:string[]}>}
+   */
+  async function beginBiometricAuth(username) {
+    const user = await userStore.findByUsername(username ?? '');
+    if (!user || !hasBiometrics(user)) {
+      throw new AuthError('Biometric login is not available', 'AUTH_BIOMETRIC_UNAVAILABLE');
+    }
+    return {
+      challenge: issueBiometricChallenge(user, BIOMETRIC_AUTH_TYP),
+      credentialIds: user.biometrics.credentials.map((c) => c.credentialId),
+    };
+  }
+
+  /**
+   * Complete a biometric assertion and issue a session. Accepts either a
+   * passwordless biometric challenge (from beginBiometricAuth) or an MFA
+   * challenge (from login step 1) — letting biometrics stand in for TOTP as the
+   * second factor on native clients.
+   * @param {object} params
+   * @param {string} params.challenge Signed challenge token.
+   * @param {string} params.credentialId The credential that signed it.
+   * @param {string} params.signature base64url signature over the challenge.
+   * @param {object} [extraClaims]
+   * @returns {Promise<{status:string, tokens:object, user:object, usedBiometric:boolean, credentialId:string}>}
+   */
+  async function verifyBiometricAssertion(params = {}, extraClaims = {}) {
+    const { challenge, credentialId, signature } = params;
+    const payload = verifyChallengeToken(challenge, [BIOMETRIC_AUTH_TYP, MFA_CHALLENGE_TYP]);
+    const user = await userStore.findById(payload.sub);
+    if (!user || !hasBiometrics(user)) {
+      throw new AuthError('Biometric login is not available', 'AUTH_BIOMETRIC_UNAVAILABLE');
+    }
+    const credential = user.biometrics.credentials.find((c) => c.credentialId === credentialId);
+    if (!credential) {
+      throw new AuthError('Unknown biometric credential', 'AUTH_BIOMETRIC_CREDENTIAL');
+    }
+
+    let ok;
+    try {
+      ok = verifyBiometricSignature({
+        publicKey: credential.publicKey,
+        algorithm: credential.algorithm,
+        data: challenge,
+        signature,
+      });
+    } catch (err) {
+      throw asAuthError(err);
+    }
+    if (!ok) {
+      throw new AuthError('Invalid biometric signature', 'AUTH_BIOMETRIC_SIGNATURE');
+    }
+    consumeChallenge(payload.jti, payload.exp);
+
+    credential.lastUsedAt = now();
+    credential.signCount += 1;
+    await userStore.save(user);
+    return {
+      status: 'authenticated',
+      user: sanitize(user),
+      usedBiometric: true,
+      credentialId,
+      tokens: sessionManager.issue(user.id, extraClaims),
+    };
+  }
+
   /** Rotate a session's tokens. Delegates to the session manager. */
   function refresh(refreshToken, extraClaims = {}) {
     return sessionManager.refresh(refreshToken, extraClaims);
@@ -286,6 +531,12 @@ export function createAuthService(config = {}) {
     beginMfaEnrollment,
     confirmMfaEnrollment,
     disableMfa,
+    beginBiometricEnrollment,
+    confirmBiometricEnrollment,
+    listBiometricCredentials,
+    removeBiometricCredential,
+    beginBiometricAuth,
+    verifyBiometricAssertion,
     refresh,
     logout,
     userStore,

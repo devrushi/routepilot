@@ -19,9 +19,10 @@ hashing (scrypt) are all built on Node's `crypto`.
 | `src/encoding.js` | base64url + base32 helpers |
 | `src/jwt.js` | HS256 JWT sign / verify / decode |
 | `src/totp.js` | HOTP, TOTP, `otpauth://` key URIs |
+| `src/biometrics.js` | device public-key import + signature verification |
 | `src/password.js` | scrypt password hashing |
 | `src/session.js` | JWT session manager (access + rotating refresh tokens) |
-| `src/auth.js` | auth service: password + optional TOTP MFA → session |
+| `src/auth.js` | auth service: password + optional TOTP MFA / biometrics → session |
 | `src/index.js` | public API barrel |
 
 ### Session handling
@@ -68,6 +69,50 @@ if (step1.status === 'mfa_required') {
   const { tokens } = await auth.verifyMfa(step1.mfaToken, '123456'); // or a recovery code
 }
 ```
+
+### Biometrics (native mobile clients)
+
+Native apps (iOS Face ID / Touch ID, Android BiometricPrompt) unlock a
+hardware-backed key pair living in the Secure Enclave / Keystore. RoutePilot
+registers only the **public** key; the device then proves possession by signing
+a short-lived, server-issued challenge. The private key never leaves the device,
+so this is a genuine possession factor — usable for **passwordless** native
+login or as a **step-up MFA factor** in place of a TOTP code.
+
+Supported signature algorithms: `ES256` (ECDSA P-256), `ES384`, and `Ed25519`.
+Public keys are accepted as PEM SPKI or base64url-encoded DER SPKI; signatures
+are base64url over the exact challenge string.
+
+```js
+// Enroll a device: sign the challenge with the freshly generated private key.
+const { challenge } = await auth.beginBiometricEnrollment(userId);
+await auth.confirmBiometricEnrollment(userId, {
+  challenge,
+  credentialId,          // stable per-device id
+  publicKey,             // PEM or base64url-DER SPKI
+  algorithm: 'ES256',
+  signature,             // base64url signature over `challenge`
+  label: 'iPhone 15',
+});
+
+// Passwordless login on a native client.
+const { challenge: c } = await auth.beginBiometricAuth('driver.jane');
+const { tokens } = await auth.verifyBiometricAssertion({
+  challenge: c,
+  credentialId,
+  signature,             // device signs `c` behind a biometric prompt
+});
+
+// Or complete an MFA challenge with biometrics instead of a TOTP code:
+const step1 = await auth.login('driver.jane', 'a-strong-password');
+if (step1.status === 'mfa_required') {
+  await auth.verifyBiometricAssertion({ challenge: step1.mfaToken, credentialId, signature });
+}
+```
+
+Signed challenges are single-use within their TTL (replay is rejected), and
+credentials can be listed (`listBiometricCredentials`) and revoked
+(`removeBiometricCredential`) — e.g. for a lost device.
 
 ## Tests
 

@@ -26,3 +26,12 @@ export {
   createInMemoryUserStore,
   AuthError,
 } from './auth.js';
+
+export {
+  verifyBiometricSignature,
+  importPublicKey,
+  normalizePublicKey,
+  isSupportedBiometricAlgorithm,
+  SUPPORTED_BIOMETRIC_ALGORITHMS,
+  BiometricError,
+} from './biometrics.js';
