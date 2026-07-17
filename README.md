@@ -25,6 +25,7 @@ hashing (scrypt) are all built on Node's `crypto`.
 | `src/auth.js` | auth service: password + optional TOTP MFA / biometrics → session |
 | `src/onboarding.js` | multi-step driver profile wizard (entity type + region + tax residency) |
 | `src/tax-residency.js` | HMRC/IRS tax residency declaration with immediate TIN validation |
+| `src/vehicles.js` | vehicle registry supporting multiple active vehicles with fuel/EV type fields |
 | `src/index.js` | public API barrel |
 
 ### Session handling
@@ -194,6 +195,61 @@ Every failure throws a `TaxResidencyError` carrying a `code`
 (`TAX_JURISDICTION`, `TAX_ID_FORMAT`, `TAX_ID_INVALID`, `TAX_ID_TYPE`,
 `TAX_NOT_CONFIRMED`). Inside the wizard these surface as a `WizardError` with the
 same code, so the tax step fails in place without advancing.
+
+## Vehicle registry
+
+Once a driver has a business profile they set up the vehicle(s) they earn with
+(_Driver Onboarding & Financial Profile › Business & Vehicle Setup › Vehicle
+Registry_). A driver is **not** limited to one vehicle — a rideshare/delivery
+driver may keep several on the road at once — so `src/vehicles.js` is a registry
+that supports **multiple active vehicles** per driver rather than a single
+record. It is the dependency-free schema + validation core for a stored vehicle:
+it knows the catalogue of **fuel / EV powertrain types** (and the extra fields an
+electric or plug-in vehicle carries), validates and normalizes a submitted
+vehicle *immediately*, and manages each vehicle's lifecycle.
+
+| Powertrain (`FUEL_TYPES`) | Category | Combustion | Chargeable (EV fields) |
+| --- | --- | --- | --- |
+| Gasoline / Diesel | `combustion` | yes | no |
+| Hybrid (HEV) | `hybrid` | yes | no |
+| Plug-in hybrid (PHEV) | `hybrid` | yes | **yes** |
+| Battery electric (BEV) | `electric` | no | **yes** |
+| Hydrogen fuel cell (FCEV) | `electric` | no | no |
+
+`chargeable` powertrains (PHEV, BEV) require the EV-only fields — a battery
+capacity in kWh and a charge connector (`EV_CONNECTOR_TYPES`: J1772, Type 2, CCS
+1/2, CHAdeMO, NACS); supplying those fields for a non-chargeable vehicle is
+rejected. VINs are validated with their ISO 3779 modulus-11 check digit
+(`computeVinCheckDigit` / `validateVin`), so a mistyped VIN is caught on entry.
+
+```js
+import { createVehicleRegistry, validateVehicle } from './src/vehicles.js';
+
+// Validate a vehicle on its own (returns the normalized schema core).
+validateVehicle({
+  vin: '5YJ3E1EA6KF000000', make: 'Tesla', model: 'Model 3', year: 2019,
+  fuelType: 'battery_electric', batteryKwh: 75, connectorType: 'nacs',
+});
+
+const registry = createVehicleRegistry();
+
+registry.add('drv_1', { vin: '1HGBH41JXMN109186', make: 'Honda', model: 'Accord', year: 2021, fuelType: 'gasoline' });
+registry.add('drv_1', { vin: '5YJ3E1EA6KF000000', make: 'Tesla', model: 'Model 3', year: 2019,
+  fuelType: 'battery_electric', batteryKwh: 75, connectorType: 'nacs' });
+
+registry.listActive('drv_1');          // both vehicles, oldest-added first
+registry.getPrimary('drv_1');          // the Honda (first active is primary by default)
+registry.setPrimary('drv_1', /* id */); // designate a different primary
+registry.deactivate('drv_1', /* id */); // temporarily off the road; primary re-assigns
+registry.retire('drv_1', /* id */);     // permanent; its VIN may be re-registered later
+```
+
+A driver may keep many **active** vehicles; exactly one active vehicle is flagged
+`primary` for the downstream financial-profile module, auto-assigned to the first
+and re-assigned whenever the current primary is deactivated, retired or removed.
+Every method returns frozen record snapshots, and failures throw a `VehicleError`
+carrying a `code` (`VEHICLE_VIN_FORMAT`, `VEHICLE_VIN_INVALID`, `VEHICLE_FUEL_TYPE`,
+`VEHICLE_CONNECTOR`, `VEHICLE_BATTERY`, `VEHICLE_DUPLICATE`, `VEHICLE_NOT_FOUND`, …).
 
 ## Tests
 
