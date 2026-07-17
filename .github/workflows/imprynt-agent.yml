@@ -81,7 +81,14 @@ jobs:
             test suite and fix any failures your change introduces — do not
             stop until the suite passes, or until you are confident the repo
             has no runnable test suite. Commit your work with a clear message.
-          claude_args: "--allowedTools Bash,Edit,Read,Write,Grep,Glob"
+
+            When you are done, report whether the test suite passed. Only
+            report true if you actually ran it and it passed, or the repo
+            genuinely has no runnable test suite — never guess.
+          claude_args: |
+            --allowedTools Bash,Edit,Read,Write,Grep,Glob
+            --json-schema '{"type":"object","properties":{"testsPass":{"type":"boolean"},"testSummary":{"type":"string"}},"required":["testsPass"]}'
+
 
       # Claude Code's own transcript (which the action already writes and
       # exposes as execution_file) ends with a type:"result" entry carrying
@@ -135,6 +142,14 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.IMPRYNT_API_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"
+
+      - name: Auto-merge if tests passed
+        if: success() && fromJSON(steps.agent.outputs.structured_output || '{}').testsPass == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge --squash --delete-branch "${{ steps.pr.outputs.url }}"
+
 
       - name: Report failure to ImpRYnt
         if: failure()
