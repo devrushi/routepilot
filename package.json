@@ -1,0 +1,15 @@
+{
+  "name": "routepilot",
+  "version": "0.1.0",
+  "description": "RoutePilot — driver onboarding & financial profile platform",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:watch": "node --test --watch"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
