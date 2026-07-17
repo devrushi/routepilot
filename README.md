@@ -23,6 +23,7 @@ hashing (scrypt) are all built on Node's `crypto`.
 | `src/password.js` | scrypt password hashing |
 | `src/session.js` | JWT session manager (access + rotating refresh tokens) |
 | `src/auth.js` | auth service: password + optional TOTP MFA / biometrics → session |
+| `src/onboarding.js` | multi-step driver profile wizard (business entity type + region) |
 | `src/index.js` | public API barrel |
 
 ### Session handling
@@ -113,6 +114,41 @@ if (step1.status === 'mfa_required') {
 Signed challenges are single-use within their TTL (replay is rejected), and
 credentials can be listed (`listBiometricCredentials`) and revoked
 (`removeBiometricCredential`) — e.g. for a lost device.
+
+## Onboarding Flow
+
+`createProfileWizard` is a small stateful wizard that walks a driver through the
+profile questions needed before their financial profile can be created
+(_Driver Onboarding & Financial Profile › Authentication & Security ›
+Onboarding Flow_). It collects, one step at a time, the driver's legal
+**business entity type** and the **region** they operate in.
+
+Steps are answered in order, each answer is validated and normalized against a
+known catalogue (`BUSINESS_ENTITY_TYPES`, `OPERATING_REGIONS` — US states + DC
+by default, both overridable), and the driver can navigate `back` (or
+`goToStep`) to revise an earlier answer. Once every step is answered the wizard
+is finalized into an immutable driver profile, with `requiresEin` derived from
+the chosen entity type for the downstream financial module.
+
+```js
+import { createProfileWizard } from './src/onboarding.js';
+
+const wizard = createProfileWizard();
+
+wizard.start('usr_123');                                  // → step 1 of 2: entity_type
+wizard.submitStep('usr_123', 'entity_type', 'single_member_llc'); // → step 2 of 2: region
+wizard.submitStep('usr_123', 'region', 'US-CA');          // → readyToComplete
+
+const profile = wizard.complete('usr_123');
+// { userId, entityType: { id, label, category }, region: { id, label, country },
+//   requiresEin: true, completedAt }
+```
+
+Every navigation method returns a serializable view (current step + options,
+`stepNumber`/`totalSteps`, `progress`, collected `answers`) suitable for
+rendering a progress bar. Invalid choices, out-of-order submissions, and
+completing before every step is answered are rejected with a `WizardError`
+carrying a `code`.
 
 ## Tests
 
