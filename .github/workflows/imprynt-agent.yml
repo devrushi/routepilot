@@ -50,6 +50,13 @@ jobs:
           git config user.name "imprynt-agent[bot]"
           git config user.email "imprynt-agent[bot]@users.noreply.github.com"
 
+      - name: Report started to ImpRYnt
+        run: |
+          curl -sf -X POST "https://imprynt.space/api/v1/pipeline/ticket-runs/${{ inputs.ticketRunId }}/started" \
+            -H "Authorization: Bearer ${{ secrets.IMPRYNT_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"runId\": \"${{ github.run_id }}\", \"runUrl\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+
       - name: Create branch
         run: git checkout -b "${{ inputs.branchName }}"
 
