@@ -19,6 +19,15 @@ export {
 
 export { hashPassword, verifyPassword } from './password.js';
 
+export {
+  generateChallenge,
+  verifyAssertion,
+  importPublicKey,
+  deriveCredentialId,
+  SUPPORTED_ALGORITHMS,
+  BiometricError,
+} from './biometrics.js';
+
 export { createSessionManager, SessionError } from './session.js';
 
 export {

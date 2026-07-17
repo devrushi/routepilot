@@ -19,9 +19,10 @@ hashing (scrypt) are all built on Node's `crypto`.
 | `src/encoding.js` | base64url + base32 helpers |
 | `src/jwt.js` | HS256 JWT sign / verify / decode |
 | `src/totp.js` | HOTP, TOTP, `otpauth://` key URIs |
+| `src/biometrics.js` | public-key challenge–response for native biometric login |
 | `src/password.js` | scrypt password hashing |
 | `src/session.js` | JWT session manager (access + rotating refresh tokens) |
-| `src/auth.js` | auth service: password + optional TOTP MFA → session |
+| `src/auth.js` | auth service: password + optional TOTP MFA + biometrics → session |
 | `src/index.js` | public API barrel |
 
 ### Session handling
@@ -68,6 +69,52 @@ if (step1.status === 'mfa_required') {
   const { tokens } = await auth.verifyMfa(step1.mfaToken, '123456'); // or a recovery code
 }
 ```
+
+### Biometrics for native mobile clients
+
+Native apps can log a driver in with **Face ID / Touch ID** (iOS Secure Enclave)
+or **Android BiometricPrompt** (Android Keystore) using public-key
+challenge–response — the same shape as WebAuthn/FIDO2 assertions. The device
+generates a hardware-backed key pair whose private key is released only after a
+successful biometric check and **never leaves the handset**; the server stores
+only the public key and verifies a signature over a fresh, single-use challenge.
+No biometric data is ever transmitted.
+
+Supported signature algorithms cover what the platform Keystore/Secure Enclave
+APIs emit: `ES256`/`ES384`/`ES512` (ECDSA — the default on both platforms),
+`RS256`/`PS256` (RSA), and `EdDSA` (Ed25519).
+
+```js
+import { createAuthService } from './src/auth.js';
+
+const auth = createAuthService({ sessionManager: sessions, challengeSecret: process.env.MFA_SECRET });
+
+// Enroll a device (call from an already-authorized session). The app generates
+// a biometric-gated key pair, signs the challenge, and registers its public key.
+const { challenge, challengeToken } = await auth.beginBiometricEnrollment(userId);
+const signature = signOnDevice(challenge); // native platform biometric prompt
+await auth.confirmBiometricEnrollment(userId, {
+  challengeToken,
+  publicKey,          // PEM, DER (Buffer/base64url) or JWK
+  algorithm: 'ES256',
+  signature,          // base64url or Buffer
+  deviceName: "Jane's iPhone",
+});
+
+// Biometric login: the app knows its credentialId from enrollment.
+const step = await auth.beginBiometricAssertion(credentialId);
+const assertion = signOnDevice(step.challenge);
+const { tokens } = await auth.verifyBiometricAssertion(step.challengeToken, assertion);
+
+// Manage enrolled devices
+await auth.listBiometricCredentials(userId);
+await auth.removeBiometricCredential(userId, credentialId); // e.g. a lost phone
+```
+
+ECDSA signatures are expected in ASN.1/DER (what Secure Enclave, Android
+Keystore and WebAuthn produce); pass `signatureFormat: 'ieee-p1363'` for raw
+`r‖s`. Challenges are single-use and expire after `biometricChallengeTtlSeconds`
+(default 120s), so a captured `(challenge, signature)` pair cannot be replayed.
 
 ## Tests
 
