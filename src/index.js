@@ -35,3 +35,10 @@ export {
   SUPPORTED_BIOMETRIC_ALGORITHMS,
   BiometricError,
 } from './biometrics.js';
+
+export {
+  createProfileWizard,
+  BUSINESS_ENTITY_TYPES,
+  OPERATING_REGIONS,
+  WizardError,
+} from './onboarding.js';
