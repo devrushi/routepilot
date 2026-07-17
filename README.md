@@ -27,6 +27,7 @@ hashing (scrypt) are all built on Node's `crypto`.
 | `src/tax-residency.js` | HMRC/IRS tax residency declaration with immediate TIN validation |
 | `src/vehicles.js` | vehicle registry supporting multiple active vehicles with fuel/EV type fields |
 | `src/vehicle-lookup.js` | fetch vehicle specifications by license plate registration number |
+| `src/dsp.js` | partner DSP linking registry with variable payout rate cards |
 | `src/index.js` | public API barrel |
 
 ### Session handling
@@ -288,6 +289,70 @@ Failures throw (or, via `handle`, map to a status) a `VehicleLookupError` with a
 `code`: `VEHICLE_LOOKUP_PLATE` (400, malformed registration), `VEHICLE_LOOKUP_NOT_FOUND`
 (404), `VEHICLE_LOOKUP_PROVIDER` (502, the authority failed or returned garbage),
 or `VEHICLE_LOOKUP_CONFIG`.
+
+## DSP connection
+
+With a business profile and a vehicle in place, a driver connects the delivery
+platforms they actually earn on — Amazon Flex, DoorDash, Uber Eats, Instacart,
+and so on (_Driver Onboarding & Financial Profile › Business & Vehicle Setup ›
+DSP Connection_). A working driver usually runs **several at once**, so
+`src/dsp.js` is a per-driver registry of **DSP links** rather than a single
+connection, and it is the dependency-free schema + validation core for a link.
+
+What makes a link more than a name is its **variable payout rate** card: a DSP
+never pays a single flat number. Earnings are assembled from several rate
+components at once — a base amount per delivery, a per-mile rate, a per-hour
+guarantee, a percentage of order value — then scaled by a peak/surge multiplier
+and raised to a minimum-guarantee floor. `computePayout` turns a rate card and a
+batch of work into an itemized estimate.
+
+| Rate component (`PAYOUT_RATE_TYPES`) | Basis (work field) | Unit |
+| --- | --- | --- |
+| `per_delivery` | `deliveries` | delivery |
+| `per_mile` | `miles` | mile |
+| `per_hour` | `hours` | hour |
+| `percentage` | `orderValue` | percent |
+
+```js
+import { createDspConnectionManager, computePayout, validatePayoutRate } from './src/dsp.js';
+
+const dsp = createDspConnectionManager();
+
+// Link a partner with a variable payout rate card (currency defaults to USD).
+const link = dsp.link('drv_1', {
+  partner: 'doordash',                 // a DSP_PARTNERS id/label, or a custom { id, label }
+  externalAccountId: 'dd-acct-123',
+  payoutRate: {
+    components: [
+      { type: 'per_delivery', rate: 3.00 },
+      { type: 'per_mile', rate: 0.65 },
+      { type: 'per_hour', rate: 18.00 },
+      { type: 'percentage', rate: 10 },  // 10% of order value
+    ],
+    peakMultiplier: 1.5,               // applied during surge
+    minimumPayout: 12.00,              // guaranteed floor per batch
+  },
+});
+
+dsp.listActive('drv_1');                              // a driver may link many partners
+dsp.updateRate('drv_1', link.id, { /* new card */ }); // rates change often
+dsp.suspend('drv_1', link.id);                        // pending → active → suspended → unlinked
+
+// Estimate a batch of work; peak applies the surge multiplier.
+dsp.estimatePayout('drv_1', link.id, { deliveries: 5, miles: 20, hours: 3, orderValue: 140 });
+dsp.estimatePayout('drv_1', link.id, { deliveries: 5, miles: 20 }, { peak: true });
+// → { currency, breakdown: [{ type, rate, unit, quantity, amount }, …],
+//     subtotal, peak, multiplier, total, floorApplied }
+
+// The rate card and its payout maths are usable standalone, too.
+computePayout(validatePayoutRate({ components: [{ type: 'per_delivery', rate: 4 }] }), { deliveries: 3 });
+```
+
+The same partner cannot be linked twice unless the earlier link was unlinked, and
+every method returns frozen record snapshots. Failures throw a `DspError`
+carrying a `code` (`DSP_PARTNER`, `DSP_RATE`, `DSP_RATE_TYPE`, `DSP_CURRENCY`,
+`DSP_WORK`, `DSP_DUPLICATE`, `DSP_STATUS`, `DSP_NOT_FOUND`, `DSP_FIELD`,
+`DSP_CONFIG`, …).
 
 ## Tests
 

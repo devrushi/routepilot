@@ -76,3 +76,14 @@ export {
   resolveFuelDescription,
   VehicleLookupError,
 } from './vehicle-lookup.js';
+
+export {
+  createDspConnectionManager,
+  validateDspLink,
+  validatePayoutRate,
+  computePayout,
+  DSP_PARTNERS,
+  PAYOUT_RATE_TYPES,
+  LINK_STATUSES,
+  DspError,
+} from './dsp.js';
