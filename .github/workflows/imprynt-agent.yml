@@ -1,3 +1,4 @@
+
 name: ImpRYnt Agent
 
 on:
@@ -29,7 +30,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  id-token: write
 
 jobs:
   # Runs the coding agent for one ticket: creates a branch, implements the
@@ -50,6 +50,9 @@ jobs:
           git config user.name "imprynt-agent[bot]"
           git config user.email "imprynt-agent[bot]@users.noreply.github.com"
 
+      # workflow_dispatch's own API response never returns the run it just
+      # created, so this is the only way ImpRYnt learns which run belongs
+      # to which ticket — needed before it can show live step progress.
       - name: Report started to ImpRYnt
         run: |
           curl -sf -X POST "https://imprynt.space/api/v1/pipeline/ticket-runs/${{ inputs.ticketRunId }}/started" \
@@ -60,9 +63,8 @@ jobs:
       - name: Create branch
         run: git checkout -b "${{ inputs.branchName }}"
 
-      # Adjust this step to whatever coding-agent action/version you're
-      # actually running — see the note at the top of this file.
       - name: Run the coding agent
+        id: agent
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -80,6 +82,22 @@ jobs:
             stop until the suite passes, or until you are confident the repo
             has no runnable test suite. Commit your work with a clear message.
           claude_args: "--allowedTools Bash,Edit,Read,Write,Grep,Glob"
+
+      # Claude Code's own transcript (which the action already writes and
+      # exposes as execution_file) ends with a type:"result" entry carrying
+      # cost_usd and token usage — read regardless of success/failure so a
+      # failed run's spend is still visible, not just a completed one.
+      - name: Extract usage from the agent's execution log
+        id: usage
+        if: always()
+        run: |
+          FILE="${{ steps.agent.outputs.execution_file }}"
+          if [ -n "$FILE" ] && [ -f "$FILE" ]; then
+            RESULT=$(jq -c '[.[] | select(.type=="result")] | last // {}' "$FILE")
+            echo "costUsd=$(echo "$RESULT" | jq -r '.cost_usd // empty')" >> "$GITHUB_OUTPUT"
+            echo "inputTokens=$(echo "$RESULT" | jq -r '.usage.input_tokens // empty')" >> "$GITHUB_OUTPUT"
+            echo "outputTokens=$(echo "$RESULT" | jq -r '.usage.output_tokens // empty')" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Push branch
         run: git push origin "${{ inputs.branchName }}"
@@ -102,18 +120,38 @@ jobs:
       - name: Report PR opened to ImpRYnt
         if: success()
         run: |
+          PAYLOAD=$(jq -n \
+            --argjson prNumber "${{ steps.pr.outputs.number }}" \
+            --arg prUrl "${{ steps.pr.outputs.url }}" \
+            --arg branchName "${{ inputs.branchName }}" \
+            --arg costUsd "${{ steps.usage.outputs.costUsd }}" \
+            --arg inputTokens "${{ steps.usage.outputs.inputTokens }}" \
+            --arg outputTokens "${{ steps.usage.outputs.outputTokens }}" \
+            '{prNumber: $prNumber, prUrl: $prUrl, branchName: $branchName}
+             + (if $costUsd != "" then {costUsd: ($costUsd | tonumber)} else {} end)
+             + (if $inputTokens != "" then {inputTokens: ($inputTokens | tonumber)} else {} end)
+             + (if $outputTokens != "" then {outputTokens: ($outputTokens | tonumber)} else {} end)')
           curl -sf -X POST "https://imprynt.space/api/v1/pipeline/ticket-runs/${{ inputs.ticketRunId }}/pr-opened" \
             -H "Authorization: Bearer ${{ secrets.IMPRYNT_API_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "{\"prNumber\": ${{ steps.pr.outputs.number }}, \"prUrl\": \"${{ steps.pr.outputs.url }}\", \"branchName\": \"${{ inputs.branchName }}\"}"
+            -d "$PAYLOAD"
 
       - name: Report failure to ImpRYnt
         if: failure()
         run: |
+          PAYLOAD=$(jq -n \
+            --arg errorMessage "The agent run failed — see the Actions log for run ${{ github.run_id }}." \
+            --arg costUsd "${{ steps.usage.outputs.costUsd }}" \
+            --arg inputTokens "${{ steps.usage.outputs.inputTokens }}" \
+            --arg outputTokens "${{ steps.usage.outputs.outputTokens }}" \
+            '{errorMessage: $errorMessage}
+             + (if $costUsd != "" then {costUsd: ($costUsd | tonumber)} else {} end)
+             + (if $inputTokens != "" then {inputTokens: ($inputTokens | tonumber)} else {} end)
+             + (if $outputTokens != "" then {outputTokens: ($outputTokens | tonumber)} else {} end)')
           curl -sf -X POST "https://imprynt.space/api/v1/pipeline/ticket-runs/${{ inputs.ticketRunId }}/failed" \
             -H "Authorization: Bearer ${{ secrets.IMPRYNT_API_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "{\"errorMessage\": \"The agent run failed — see the Actions log for run ${{ github.run_id }}.\"}"
+            -d "$PAYLOAD"
 
   # Fires on every PR close; only acts on PRs the "implement" job itself
   # opened (recognized by the imprynt/ticket-run-<id> branch prefix, which
