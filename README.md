@@ -23,7 +23,8 @@ hashing (scrypt) are all built on Node's `crypto`.
 | `src/password.js` | scrypt password hashing |
 | `src/session.js` | JWT session manager (access + rotating refresh tokens) |
 | `src/auth.js` | auth service: password + optional TOTP MFA / biometrics → session |
-| `src/onboarding.js` | multi-step driver profile wizard (business entity type + region) |
+| `src/onboarding.js` | multi-step driver profile wizard (entity type + region + tax residency) |
+| `src/tax-residency.js` | HMRC/IRS tax residency declaration with immediate TIN validation |
 | `src/index.js` | public API barrel |
 
 ### Session handling
@@ -121,7 +122,8 @@ credentials can be listed (`listBiometricCredentials`) and revoked
 profile questions needed before their financial profile can be created
 (_Driver Onboarding & Financial Profile › Authentication & Security ›
 Onboarding Flow_). It collects, one step at a time, the driver's legal
-**business entity type** and the **region** they operate in.
+**business entity type**, the **region** they operate in, and their **tax
+residency declaration**.
 
 Steps are answered in order, each answer is validated and normalized against a
 known catalogue (`BUSINESS_ENTITY_TYPES`, `OPERATING_REGIONS` — US states + DC
@@ -135,12 +137,17 @@ import { createProfileWizard } from './src/onboarding.js';
 
 const wizard = createProfileWizard();
 
-wizard.start('usr_123');                                  // → step 1 of 2: entity_type
-wizard.submitStep('usr_123', 'entity_type', 'single_member_llc'); // → step 2 of 2: region
-wizard.submitStep('usr_123', 'region', 'US-CA');          // → readyToComplete
+wizard.start('usr_123');                                  // → step 1 of 3: entity_type
+wizard.submitStep('usr_123', 'entity_type', 'single_member_llc'); // → step 2 of 3: region
+wizard.submitStep('usr_123', 'region', 'US-CA');          // → step 3 of 3: tax_residency
+wizard.submitStep('usr_123', 'tax_residency', {           // → readyToComplete
+  jurisdiction: 'US', taxId: '12-3456789', taxIdType: 'ein', confirmed: true,
+});
 
 const profile = wizard.complete('usr_123');
 // { userId, entityType: { id, label, category }, region: { id, label, country },
+//   taxResidency: { jurisdiction: { id, label, country, authority },
+//                   taxIdType, taxIdLabel, taxId, taxIdFormatted, confirmed },
 //   requiresEin: true, completedAt }
 ```
 
@@ -149,6 +156,44 @@ Every navigation method returns a serializable view (current step + options,
 rendering a progress bar. Invalid choices, out-of-order submissions, and
 completing before every step is answered are rejected with a `WizardError`
 carrying a `code`.
+
+### Tax residency declaration
+
+The final onboarding step is the driver's tax residency declaration
+(_Driver Onboarding & Financial Profile › Authentication & Security ›
+Onboarding Flow › Design HMRC/IRS tax residency declaration step with immediate
+validation_). `src/tax-residency.js` is the dependency-free validation core: it
+knows the two jurisdictions RoutePilot files with — the **US (IRS)** and the
+**UK (HMRC)** — and validates the matching taxpayer identification number
+**immediately**, so a driver gets a specific, coded error the moment they submit
+rather than after a downstream filing bounces.
+
+| Authority | Accepted tax IDs | Validation |
+| --- | --- | --- |
+| IRS (US) | SSN, ITIN, EIN | area/group/serial rules, ITIN group ranges, IRS-assigned EIN prefixes |
+| HMRC (UK) | UTR, NINO | UTR modulus-11 check digit, NINO prefix/suffix allocation rules |
+
+```js
+import { declareTaxResidency, validateTaxId } from './src/tax-residency.js';
+
+// Full declaration (the driver must affirm `confirmed: true`).
+const declaration = declareTaxResidency({
+  jurisdiction: 'GB',          // id / ISO country code / label; "UK" aliases "GB"
+  taxId: '11234 56789',        // whitespace and separators are tolerated
+  confirmed: true,
+});
+// → { jurisdiction: { id: 'GB', authority: 'HMRC', ... },
+//     taxIdType: 'utr', taxId: '1123456789', taxIdFormatted: '11234 56789', confirmed: true }
+
+// Or just validate a TIN. The type is auto-detected within the jurisdiction;
+// pass `taxIdType` to force one (e.g. a sole proprietor's EIN vs SSN).
+validateTaxId({ jurisdiction: 'US', taxId: '12-3456789', taxIdType: 'ein' });
+```
+
+Every failure throws a `TaxResidencyError` carrying a `code`
+(`TAX_JURISDICTION`, `TAX_ID_FORMAT`, `TAX_ID_INVALID`, `TAX_ID_TYPE`,
+`TAX_NOT_CONFIRMED`). Inside the wizard these surface as a `WizardError` with the
+same code, so the tax step fails in place without advancing.
 
 ## Tests
 

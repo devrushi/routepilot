@@ -10,6 +10,12 @@
 // into an immutable driver profile (with a few fields derived for the
 // downstream financial-profile module, e.g. whether an EIN is required).
 
+import {
+  createTaxResidencyStep,
+  TAX_JURISDICTIONS,
+  TaxResidencyError,
+} from './tax-residency.js';
+
 export class WizardError extends Error {
   constructor(message, code = 'WIZARD_INVALID') {
     super(message);
@@ -59,12 +65,33 @@ export const OPERATING_REGIONS = Object.entries(US_STATES).map(([code, label]) =
 const IN_PROGRESS = 'in_progress';
 const COMPLETED = 'completed';
 
+// Build the tax residency declaration step and adapt its validation errors to
+// the wizard's error contract, preserving the specific code (e.g.
+// `TAX_ID_INVALID`) so callers still learn exactly why a declaration bounced.
+function taxResidencyStep(jurisdictions) {
+  const step = createTaxResidencyStep({ jurisdictions });
+  return {
+    ...step,
+    validate(value) {
+      try {
+        return step.validate(value);
+      } catch (err) {
+        if (err instanceof TaxResidencyError) {
+          throw new WizardError(err.message, err.code);
+        }
+        throw err;
+      }
+    },
+  };
+}
+
 /**
  * Create a driver profile wizard.
  * @param {object} [config]
  * @param {Map} [config.store] Per-user wizard state store (defaults in-memory).
  * @param {Array} [config.entityTypes] Allowed business entity types.
  * @param {Array} [config.regions] Allowed operating regions.
+ * @param {Array} [config.jurisdictions] Allowed tax residency jurisdictions.
  * @param {() => number} [config.now] Clock in ms (injectable for tests).
  */
 export function createProfileWizard(config = {}) {
@@ -72,6 +99,7 @@ export function createProfileWizard(config = {}) {
     store = new Map(),
     entityTypes = BUSINESS_ENTITY_TYPES,
     regions = OPERATING_REGIONS,
+    jurisdictions = TAX_JURISDICTIONS,
     now = () => Date.now(),
   } = config;
 
@@ -80,6 +108,9 @@ export function createProfileWizard(config = {}) {
   }
   if (!Array.isArray(regions) || regions.length === 0) {
     throw new WizardError('At least one operating region is required', 'WIZARD_CONFIG');
+  }
+  if (!Array.isArray(jurisdictions) || jurisdictions.length === 0) {
+    throw new WizardError('At least one tax jurisdiction is required', 'WIZARD_CONFIG');
   }
 
   const entityById = new Map(entityTypes.map((e) => [e.id, e]));
@@ -101,6 +132,7 @@ export function createProfileWizard(config = {}) {
       id: 'entity_type',
       title: 'Business entity type',
       prompt: 'What kind of business do you operate as?',
+      kind: 'choice',
       options: () => entityTypes.map((e) => ({ id: e.id, label: e.label })),
       validate(value) {
         const match = resolve(entityTypes, value);
@@ -114,6 +146,7 @@ export function createProfileWizard(config = {}) {
       id: 'region',
       title: 'Operating region',
       prompt: 'Which region will you primarily operate in?',
+      kind: 'choice',
       options: () => regions.map((r) => ({ id: r.id, label: r.label })),
       validate(value) {
         const match = resolve(regions, value);
@@ -123,6 +156,7 @@ export function createProfileWizard(config = {}) {
         return match.id;
       },
     },
+    taxResidencyStep(jurisdictions),
   ];
 
   const stepIndexById = new Map(steps.map((s, i) => [s.id, i]));
@@ -150,6 +184,7 @@ export function createProfileWizard(config = {}) {
         id: current.id,
         title: current.title,
         prompt: current.prompt,
+        kind: current.kind ?? 'choice',
         options: current.options(),
         answer: state.answers[current.id] ?? null,
       },
@@ -278,6 +313,7 @@ export function createProfileWizard(config = {}) {
 
     const entity = entityById.get(state.answers.entity_type);
     const region = regionById.get(state.answers.region);
+    const taxResidency = state.answers.tax_residency;
     const profile = {
       userId: state.userId,
       entityType: {
@@ -290,6 +326,7 @@ export function createProfileWizard(config = {}) {
         label: region.label,
         country: region.country,
       },
+      taxResidency,
       requiresEin: entity.requiresEin,
       completedAt: now(),
     };
@@ -307,6 +344,7 @@ export function createProfileWizard(config = {}) {
       id: s.id,
       title: s.title,
       prompt: s.prompt,
+      kind: s.kind ?? 'choice',
       options: s.options(),
     }));
   }

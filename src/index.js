@@ -42,3 +42,18 @@ export {
   OPERATING_REGIONS,
   WizardError,
 } from './onboarding.js';
+
+export {
+  createTaxResidencyStep,
+  declareTaxResidency,
+  validateTaxId,
+  validateSsn,
+  validateItin,
+  validateEin,
+  validateUtr,
+  validateNino,
+  computeUtrCheckDigit,
+  TAX_JURISDICTIONS,
+  TAX_ID_TYPES,
+  TaxResidencyError,
+} from './tax-residency.js';
