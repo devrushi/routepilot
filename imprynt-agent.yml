@@ -1,0 +1,138 @@
+name: ImpRYnt Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticketRunId:
+        required: true
+        type: string
+      ticketId:
+        required: true
+        type: string
+      ticketTitle:
+        required: true
+        type: string
+      ticketDescription:
+        required: false
+        type: string
+        default: ""
+      ticketBreadcrumb:
+        required: false
+        type: string
+        default: ""
+      branchName:
+        required: true
+        type: string
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Runs the coding agent for one ticket: creates a branch, implements the
+  # ticket, runs this repo's own test suite as a gate (the agent is told to
+  # fix failures rather than stop), pushes, opens a PR, then reports back to
+  # ImpRYnt so it can show the PR link. Any failure here reports "failed",
+  # which stops the whole milestone run rather than skipping ahead.
+  implement:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "imprynt-agent[bot]"
+          git config user.email "imprynt-agent[bot]@users.noreply.github.com"
+
+      - name: Create branch
+        run: git checkout -b "${{ inputs.branchName }}"
+
+      # Adjust this step to whatever coding-agent action/version you're
+      # actually running — see the note at the top of this file.
+      - name: Run the coding agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are implementing a single ticket end to end in this repository.
+
+            Ticket: ${{ inputs.ticketTitle }}
+            Location: ${{ inputs.ticketBreadcrumb }}
+            Details:
+            ${{ inputs.ticketDescription }}
+
+            Implement this ticket completely. Then run this repository's own
+            test suite and fix any failures your change introduces — do not
+            stop until the suite passes, or until you are confident the repo
+            has no runnable test suite. Commit your work with a clear message.
+          allowed_tools: "Bash,Edit,Read,Write,Grep,Glob"
+
+      - name: Push branch
+        run: git push origin "${{ inputs.branchName }}"
+
+      - name: Open PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          url=$(gh pr create \
+            --title "${{ inputs.ticketTitle }}" \
+            --body "Implements: ${{ inputs.ticketBreadcrumb }} — ${{ inputs.ticketTitle }}
+
+          Opened automatically by ImpRYnt's implementation pipeline." \
+            --head "${{ inputs.branchName }}" \
+            --base "${{ github.event.repository.default_branch }}")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "number=$(gh pr view "$url" --json number -q .number)" >> "$GITHUB_OUTPUT"
+
+      - name: Report PR opened to ImpRYnt
+        if: success()
+        run: |
+          curl -sf -X POST "https://imprynt.space/api/v1/pipeline/ticket-runs/${{ inputs.ticketRunId }}/pr-opened" \
+            -H "Authorization: Bearer ${{ secrets.IMPRYNT_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"prNumber\": ${{ steps.pr.outputs.number }}, \"prUrl\": \"${{ steps.pr.outputs.url }}\", \"branchName\": \"${{ inputs.branchName }}\"}"
+
+      - name: Report failure to ImpRYnt
+        if: failure()
+        run: |
+          curl -sf -X POST "https://imprynt.space/api/v1/pipeline/ticket-runs/${{ inputs.ticketRunId }}/failed" \
+            -H "Authorization: Bearer ${{ secrets.IMPRYNT_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"errorMessage\": \"The agent run failed — see the Actions log for run ${{ github.run_id }}.\"}"
+
+  # Fires on every PR close; only acts on PRs the "implement" job itself
+  # opened (recognized by the imprynt/ticket-run-<id> branch prefix, which
+  # is where the TicketRun id round-trips back to ImpRYnt from). Merging
+  # is what actually advances the pipeline to the next ticket; closing
+  # without merging reports "failed" so the run doesn't hang forever.
+  report-merge:
+    if: |
+      github.event_name == 'pull_request' &&
+      startsWith(github.event.pull_request.head.ref, 'imprynt/ticket-run-')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract ticket run id
+        id: parse
+        run: |
+          ref="${{ github.event.pull_request.head.ref }}"
+          echo "ticketRunId=${ref#imprynt/ticket-run-}" >> "$GITHUB_OUTPUT"
+
+      - name: Report merged
+        if: github.event.pull_request.merged == true
+        run: |
+          curl -sf -X POST "https://imprynt.space/api/v1/pipeline/ticket-runs/${{ steps.parse.outputs.ticketRunId }}/merged" \
+            -H "Authorization: Bearer ${{ secrets.IMPRYNT_API_TOKEN }}"
+
+      - name: Report closed without merge
+        if: github.event.pull_request.merged != true
+        run: |
+          curl -sf -X POST "https://imprynt.space/api/v1/pipeline/ticket-runs/${{ steps.parse.outputs.ticketRunId }}/failed" \
+            -H "Authorization: Bearer ${{ secrets.IMPRYNT_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"errorMessage\": \"The PR was closed without merging.\"}"
