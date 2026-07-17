@@ -57,3 +57,14 @@ export {
   TAX_ID_TYPES,
   TaxResidencyError,
 } from './tax-residency.js';
+
+export {
+  createVehicleRegistry,
+  validateVehicle,
+  validateVin,
+  computeVinCheckDigit,
+  FUEL_TYPES,
+  EV_CONNECTOR_TYPES,
+  VEHICLE_STATUSES,
+  VehicleError,
+} from './vehicles.js';
