@@ -26,6 +26,7 @@ hashing (scrypt) are all built on Node's `crypto`.
 | `src/onboarding.js` | multi-step driver profile wizard (entity type + region + tax residency) |
 | `src/tax-residency.js` | HMRC/IRS tax residency declaration with immediate TIN validation |
 | `src/vehicles.js` | vehicle registry supporting multiple active vehicles with fuel/EV type fields |
+| `src/vehicle-lookup.js` | fetch vehicle specifications by license plate registration number |
 | `src/index.js` | public API barrel |
 
 ### Session handling
@@ -250,6 +251,43 @@ and re-assigned whenever the current primary is deactivated, retired or removed.
 Every method returns frozen record snapshots, and failures throw a `VehicleError`
 carrying a `code` (`VEHICLE_VIN_FORMAT`, `VEHICLE_VIN_INVALID`, `VEHICLE_FUEL_TYPE`,
 `VEHICLE_CONNECTOR`, `VEHICLE_BATTERY`, `VEHICLE_DUPLICATE`, `VEHICLE_NOT_FOUND`, …).
+
+### Lookup by license plate
+
+Rather than make a driver hand-type every field, `src/vehicle-lookup.js` fetches a
+vehicle's **specifications from its license plate registration number** (_Driver
+Onboarding & Financial Profile › Business & Vehicle Setup › Vehicle Registry_) so
+the registry form can be pre-filled. The network call to the registration
+authority (a DVLA Vehicle Enquiry-style service) is an injectable `provider`, so
+the endpoint stays dependency-free and fully testable: it normalizes the
+registration, resolves the authority's fuel description onto the `FUEL_TYPES`
+catalogue, coerces partial provider data into a stable spec, and optionally
+caches results.
+
+```js
+import { createVehicleLookup } from './src/vehicle-lookup.js';
+
+const lookup = createVehicleLookup({
+  // `provider` is where a real deployment calls the authority; return null if unknown.
+  provider: async (registration) => fetchFromAuthority(registration),
+  cache: new Map(),
+  ttlMs: 24 * 60 * 60 * 1000,
+});
+
+// Service core — throws a VehicleLookupError on bad input / not found / provider error.
+const spec = await lookup.lookup('AB12 CDE');
+// { registration: 'AB12CDE', make, model, year, fuel: { id, label, … },
+//   fuelDescription, colour, engineCapacityCc, co2Emissions, source, fetchedAt }
+
+// HTTP-shaped adapter for a route like GET /vehicles/specifications?registration=AB12CDE
+await lookup.handle({ registration: 'AB12CDE' }); // { status: 200, body: { vehicle } }
+await lookup.handle({ registration: 'ZZ' });      // 404 { error: { code: 'VEHICLE_LOOKUP_NOT_FOUND', … } }
+```
+
+Failures throw (or, via `handle`, map to a status) a `VehicleLookupError` with a
+`code`: `VEHICLE_LOOKUP_PLATE` (400, malformed registration), `VEHICLE_LOOKUP_NOT_FOUND`
+(404), `VEHICLE_LOOKUP_PROVIDER` (502, the authority failed or returned garbage),
+or `VEHICLE_LOOKUP_CONFIG`.
 
 ## Tests
 
