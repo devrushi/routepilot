@@ -102,6 +102,8 @@ export function createShiftTracker(config = {}) {
       startLocation: location,
       endedAt: null,
       endLocation: null,
+      breaks: [],
+      waits: [],
     };
     shifts.set(record.id, record);
     return snapshot(record);
@@ -129,6 +131,91 @@ export function createShiftTracker(config = {}) {
     return snapshot(record);
   }
 
+  // Breaks and wait periods share the same start/end/duration shape and
+  // single-open-at-a-time rule, so both are driven through these two
+  // helpers, parameterized by which list ('breaks' or 'waits') they touch.
+
+  function startPeriod(driverId, listKey, alreadyActiveCode, input) {
+    const record = findActive(driverId);
+    if (!record) {
+      throw new ShiftError(`Driver "${driverId}" has no active shift`, 'SHIFT_NOT_ACTIVE');
+    }
+    const list = record[listKey];
+    if (list.some((p) => p.endedAt === null)) {
+      const label = listKey === 'breaks' ? 'break' : 'wait period';
+      throw new ShiftError(`A ${label} is already in progress`, alreadyActiveCode);
+    }
+    list.push({ id: randomUUID(), startedAt: input.at ?? now(), endedAt: null, durationMs: null });
+    return snapshot(record);
+  }
+
+  function endPeriod(driverId, listKey, notActiveCode, input) {
+    const record = findActive(driverId);
+    if (!record) {
+      throw new ShiftError(`Driver "${driverId}" has no active shift`, 'SHIFT_NOT_ACTIVE');
+    }
+    const open = record[listKey].find((p) => p.endedAt === null);
+    if (!open) {
+      const label = listKey === 'breaks' ? 'break' : 'wait period';
+      throw new ShiftError(`No ${label} is in progress`, notActiveCode);
+    }
+    open.endedAt = input.at ?? now();
+    open.durationMs = open.endedAt - open.startedAt;
+    return snapshot(record);
+  }
+
+  /**
+   * Start a break during the driver's active shift.
+   * @param {string} driverId
+   * @param {object} [input] `{ at }` timestamp override.
+   * @returns {object} The updated, frozen shift record.
+   */
+  function startBreak(driverId, input = {}) {
+    return startPeriod(driverId, 'breaks', 'SHIFT_BREAK_ALREADY_ACTIVE', input);
+  }
+
+  /** End the driver's in-progress break. */
+  function endBreak(driverId, input = {}) {
+    return endPeriod(driverId, 'breaks', 'SHIFT_BREAK_NOT_ACTIVE', input);
+  }
+
+  /**
+   * Start a wait period (e.g. waiting for a delivery pickup) during the
+   * driver's active shift.
+   * @param {string} driverId
+   * @param {object} [input] `{ at }` timestamp override.
+   * @returns {object} The updated, frozen shift record.
+   */
+  function startWait(driverId, input = {}) {
+    return startPeriod(driverId, 'waits', 'SHIFT_WAIT_ALREADY_ACTIVE', input);
+  }
+
+  /** End the driver's in-progress wait period. */
+  function endWait(driverId, input = {}) {
+    return endPeriod(driverId, 'waits', 'SHIFT_WAIT_NOT_ACTIVE', input);
+  }
+
+  function requireShift(driverId, shiftId) {
+    const shifts = store.get(driverId);
+    const record = shifts && shifts.get(shiftId);
+    if (!record) {
+      throw new ShiftError(`No shift "${shiftId}" for driver "${driverId}"`, 'SHIFT_NOT_FOUND');
+    }
+    return record;
+  }
+
+  /**
+   * Total break and wait time logged against a shift (active or completed).
+   * Any still-open period (not yet ended) contributes nothing — end it first
+   * to have it counted.
+   * @returns {{ totalBreakMs: number, totalWaitMs: number }}
+   */
+  function getDurations(driverId, shiftId) {
+    const record = requireShift(driverId, shiftId);
+    const sum = (periods) => periods.reduce((total, p) => total + (p.durationMs ?? 0), 0);
+    return { totalBreakMs: sum(record.breaks), totalWaitMs: sum(record.waits) };
+  }
+
   /** Get a driver's currently active shift, or `null`. */
   function getActive(driverId) {
     const record = findActive(driverId);
@@ -149,5 +236,17 @@ export function createShiftTracker(config = {}) {
     return [...shifts.values()].sort((a, b) => a.startedAt - b.startedAt).map(snapshot);
   }
 
-  return { startShift, endShift, getActive, get, list, store };
+  return {
+    startShift,
+    endShift,
+    startBreak,
+    endBreak,
+    startWait,
+    endWait,
+    getDurations,
+    getActive,
+    get,
+    list,
+    store,
+  };
 }

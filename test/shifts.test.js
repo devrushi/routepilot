@@ -69,3 +69,72 @@ test('list returns a driver\'s shifts oldest first, isolated per driver', () => 
   assert.equal(list[1].id, second.id);
   assert.equal(tracker.list('drv_2').length, 1);
 });
+
+test('startBreak/endBreak record a break with a computed duration', () => {
+  const nowRef = { value: 1_700_000_000_000 };
+  const tracker = makeTracker(nowRef);
+  tracker.startShift('drv_1', { lat: 1, long: 1 });
+
+  const started = tracker.startBreak('drv_1');
+  assert.equal(started.breaks.length, 1);
+  assert.equal(started.breaks[0].endedAt, null);
+
+  nowRef.value += 15 * 60 * 1000;
+  const ended = tracker.endBreak('drv_1');
+  assert.equal(ended.breaks[0].durationMs, 15 * 60 * 1000);
+});
+
+test('startWait/endWait record a wait period with a computed duration', () => {
+  const nowRef = { value: 1_700_000_000_000 };
+  const tracker = makeTracker(nowRef);
+  tracker.startShift('drv_1', { lat: 1, long: 1 });
+
+  tracker.startWait('drv_1');
+  nowRef.value += 5 * 60 * 1000;
+  const ended = tracker.endWait('drv_1');
+  assert.equal(ended.waits.length, 1);
+  assert.equal(ended.waits[0].durationMs, 5 * 60 * 1000);
+});
+
+test('breaks and waits require an active shift and reject double-starts/ends', () => {
+  const nowRef = { value: 1_700_000_000_000 };
+  const tracker = makeTracker(nowRef);
+  assert.throws(() => tracker.startBreak('drv_1'), (e) => e.code === 'SHIFT_NOT_ACTIVE');
+
+  tracker.startShift('drv_1', { lat: 1, long: 1 });
+  assert.throws(() => tracker.endBreak('drv_1'), (e) => e.code === 'SHIFT_BREAK_NOT_ACTIVE');
+  tracker.startBreak('drv_1');
+  assert.throws(() => tracker.startBreak('drv_1'), (e) => e.code === 'SHIFT_BREAK_ALREADY_ACTIVE');
+
+  assert.throws(() => tracker.endWait('drv_1'), (e) => e.code === 'SHIFT_WAIT_NOT_ACTIVE');
+  tracker.startWait('drv_1');
+  assert.throws(() => tracker.startWait('drv_1'), (e) => e.code === 'SHIFT_WAIT_ALREADY_ACTIVE');
+});
+
+test('getDurations sums multiple breaks and wait periods for a shift', () => {
+  const nowRef = { value: 1_700_000_000_000 };
+  const tracker = makeTracker(nowRef);
+  const shift = tracker.startShift('drv_1', { lat: 1, long: 1 });
+
+  tracker.startBreak('drv_1');
+  nowRef.value += 10 * 60 * 1000;
+  tracker.endBreak('drv_1');
+
+  tracker.startWait('drv_1');
+  nowRef.value += 20 * 60 * 1000;
+  tracker.endWait('drv_1');
+
+  tracker.startBreak('drv_1');
+  nowRef.value += 5 * 60 * 1000;
+  tracker.endBreak('drv_1');
+
+  const durations = tracker.getDurations('drv_1', shift.id);
+  assert.equal(durations.totalBreakMs, 15 * 60 * 1000);
+  assert.equal(durations.totalWaitMs, 20 * 60 * 1000);
+});
+
+test('getDurations throws for an unknown shift', () => {
+  const nowRef = { value: 1_700_000_000_000 };
+  const tracker = makeTracker(nowRef);
+  assert.throws(() => tracker.getDurations('drv_1', 'nope'), (e) => e.code === 'SHIFT_NOT_FOUND');
+});
