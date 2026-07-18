@@ -99,3 +99,12 @@ export {
 export { createServer, DEFAULT_PORT } from './server.js';
 
 export { createShiftTracker, ShiftError } from './shifts.js';
+
+export {
+  createFuelLogger,
+  convertCurrency,
+  convertVolume,
+  DEFAULT_EXCHANGE_RATES,
+  BASE_CURRENCY,
+  FuelError,
+} from './fuel.js';
