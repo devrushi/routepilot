@@ -95,3 +95,5 @@ export {
   ROUTE_STATUSES,
   RouteSyncError,
 } from './route-sync.js';
+
+export { createServer, DEFAULT_PORT } from './server.js';

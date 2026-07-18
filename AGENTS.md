@@ -13,3 +13,7 @@ RoutePilot is a driver onboarding & financial profile platform for gig/delivery 
 ## Decisions & Conventions Log
 
 (Empty so far. Add 1-3 short bullets here only for a genuinely reusable decision — a new shared module, a workaround for a specific issue, a naming convention a future ticket should follow. Skip routine, ticket-specific details. Prune anything below that's no longer true instead of letting it accumulate.)
+
+- HTTP server (`src/server.js`, `createServer()`) is built on Node's built-in `http` module, not Express — the repo had zero dependencies before this, so a hand-rolled router keeps that true. Revisit if routing needs grow (path params, middleware).
+- `createServer()` only builds the server; it self-starts (reading `PORT`, default 3000) only when run directly via `node src/server.js` / `npm start`, guarded by an `import.meta.url` check. Import `createServer` from `src/index.js` for tests/composition instead of spawning a real process.
+- Route handlers respond with `sendJson(res, status, body)` — keep new routes returning JSON via that helper for consistent headers.
