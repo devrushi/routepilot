@@ -97,3 +97,5 @@ export {
 } from './route-sync.js';
 
 export { createServer, DEFAULT_PORT } from './server.js';
+
+export { createShiftTracker, ShiftError } from './shifts.js';
