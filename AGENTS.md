@@ -1,0 +1,15 @@
+# RoutePilot — Agent Notes
+
+RoutePilot is a driver onboarding & financial profile platform for gig/delivery drivers. This file is read automatically by the coding agent before each ticket, and the agent appends to the log below as it learns things — keep it accurate and short; prune stale entries rather than letting this grow forever.
+
+## Stack & conventions
+
+- Plain Node.js, ESM (`"type": "module"` in package.json). No web framework is wired up yet — check `package.json` dependencies before assuming one exists, since a "Basic Platform Setup" ticket may have added one since this was written.
+- Tests: Node's built-in test runner (`node --test`), not Jest/Mocha/Vitest. Run with `npm test`. Convention is one `test/<name>.test.js` file per `src/<name>.js` module.
+- `src/index.js` is the public entry point — it re-exports the pieces other code is meant to consume. When a ticket adds a new module other code should use, add its exports here too.
+- Error handling convention: each module defines its own `<Name>Error` class (e.g. `AuthError`, `WizardError`, `JwtError`, `SessionError`, `BiometricError`) rather than throwing a plain `Error` — follow this pattern for new modules.
+- Existing modules (as of when this was written): `auth.js`, `biometrics.js`, `dsp.js`, `encoding.js`, `jwt.js`, `onboarding.js`, `password.js`, `route-sync.js`, `session.js`, `tax-residency.js`, `totp.js`, `vehicle-lookup.js`, `vehicles.js`.
+
+## Decisions & Conventions Log
+
+(Empty so far. Add 1-3 short bullets here only for a genuinely reusable decision — a new shared module, a workaround for a specific issue, a naming convention a future ticket should follow. Skip routine, ticket-specific details. Prune anything below that's no longer true instead of letting it accumulate.)
