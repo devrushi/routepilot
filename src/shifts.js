@@ -31,6 +31,30 @@ function validateLocation(location) {
   return { lat, long };
 }
 
+const EARTH_RADIUS_MILES = 3958.8;
+
+// Great-circle distance between two { lat, long } points, in miles.
+function haversineMiles(a, b) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLong = toRad(b.long - a.long);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLong / 2) ** 2;
+  return EARTH_RADIUS_MILES * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+function roundDistance(value) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function validateOdometerReading(value, field) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new ShiftError(`${field} must be a non-negative finite number`, 'SHIFT_ODOMETER');
+  }
+  return value;
+}
+
 function deepFreeze(obj) {
   if (obj && typeof obj === 'object') {
     for (const key of Object.keys(obj)) deepFreeze(obj[key]);
@@ -104,6 +128,7 @@ export function createShiftTracker(config = {}) {
       endLocation: null,
       breaks: [],
       waits: [],
+      trip: { gpsPoints: [], gpsDistanceMiles: 0, odometer: null },
     };
     shifts.set(record.id, record);
     return snapshot(record);
@@ -205,6 +230,68 @@ export function createShiftTracker(config = {}) {
   }
 
   /**
+   * Append one GPS point to the active shift's trip and accumulate the
+   * distance from the previous point (haversine great-circle distance, in
+   * miles). The first point of a trip has nothing to accumulate against.
+   * @param {string} driverId
+   * @param {object} input `{ lat, long, at? }`
+   * @returns {object} The updated, frozen shift record.
+   */
+  function addGpsPoint(driverId, input = {}) {
+    const record = findActive(driverId);
+    if (!record) {
+      throw new ShiftError(`Driver "${driverId}" has no active shift`, 'SHIFT_NOT_ACTIVE');
+    }
+    const location = validateLocation(input);
+    const point = { lat: location.lat, long: location.long, at: input.at ?? now() };
+    const { gpsPoints } = record.trip;
+    if (gpsPoints.length > 0) {
+      record.trip.gpsDistanceMiles = roundDistance(
+        record.trip.gpsDistanceMiles + haversineMiles(gpsPoints[gpsPoints.length - 1], point),
+      );
+    }
+    gpsPoints.push(point);
+    return snapshot(record);
+  }
+
+  /**
+   * Record a manual odometer start/end reading for the active shift's trip.
+   * When present, this takes precedence over GPS-accumulated distance (see
+   * {@link getTripDistance}) — the driver's own reading is treated as ground
+   * truth over an inferred one.
+   * @param {string} driverId
+   * @param {object} input `{ startMiles, endMiles }`
+   * @returns {object} The updated, frozen shift record.
+   */
+  function setOdometer(driverId, input = {}) {
+    const record = findActive(driverId);
+    if (!record) {
+      throw new ShiftError(`Driver "${driverId}" has no active shift`, 'SHIFT_NOT_ACTIVE');
+    }
+    const startMiles = validateOdometerReading(input.startMiles, 'startMiles');
+    const endMiles = validateOdometerReading(input.endMiles, 'endMiles');
+    if (endMiles < startMiles) {
+      throw new ShiftError('endMiles cannot be less than startMiles', 'SHIFT_ODOMETER');
+    }
+    record.trip.odometer = { startMiles, endMiles };
+    return snapshot(record);
+  }
+
+  /**
+   * The trip distance for a shift: the manual odometer reading when one has
+   * been recorded, otherwise the GPS-accumulated distance.
+   * @returns {{ distanceMiles: number, source: 'odometer'|'gps' }}
+   */
+  function getTripDistance(driverId, shiftId) {
+    const record = requireShift(driverId, shiftId);
+    if (record.trip.odometer) {
+      const { startMiles, endMiles } = record.trip.odometer;
+      return { distanceMiles: roundDistance(endMiles - startMiles), source: 'odometer' };
+    }
+    return { distanceMiles: record.trip.gpsDistanceMiles, source: 'gps' };
+  }
+
+  /**
    * Total break and wait time logged against a shift (active or completed).
    * Any still-open period (not yet ended) contributes nothing — end it first
    * to have it counted.
@@ -244,6 +331,9 @@ export function createShiftTracker(config = {}) {
     startWait,
     endWait,
     getDurations,
+    addGpsPoint,
+    setOdometer,
+    getTripDistance,
     getActive,
     get,
     list,

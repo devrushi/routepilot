@@ -138,3 +138,52 @@ test('getDurations throws for an unknown shift', () => {
   const tracker = makeTracker(nowRef);
   assert.throws(() => tracker.getDurations('drv_1', 'nope'), (e) => e.code === 'SHIFT_NOT_FOUND');
 });
+
+test('addGpsPoint accumulates distance across consecutive points', () => {
+  const nowRef = { value: 1_700_000_000_000 };
+  const tracker = makeTracker(nowRef);
+  const shift = tracker.startShift('drv_1', { lat: 40.7128, long: -74.006 });
+
+  // A single point has nothing to accumulate against yet.
+  const afterFirst = tracker.addGpsPoint('drv_1', { lat: 40.7128, long: -74.006 });
+  assert.equal(afterFirst.trip.gpsDistanceMiles, 0);
+
+  // Roughly the straight-line distance from NYC to Philadelphia (~80 miles).
+  tracker.addGpsPoint('drv_1', { lat: 39.9526, long: -75.1652 });
+  const distance = tracker.getTripDistance('drv_1', shift.id);
+  assert.equal(distance.source, 'gps');
+  assert.ok(distance.distanceMiles > 75 && distance.distanceMiles < 85, `expected ~80mi, got ${distance.distanceMiles}`);
+});
+
+test('addGpsPoint rejects an invalid location and requires an active shift', () => {
+  const nowRef = { value: 1_700_000_000_000 };
+  const tracker = makeTracker(nowRef);
+  assert.throws(() => tracker.addGpsPoint('drv_1', { lat: 1, long: 1 }), (e) => e.code === 'SHIFT_NOT_ACTIVE');
+
+  tracker.startShift('drv_1', { lat: 1, long: 1 });
+  assert.throws(() => tracker.addGpsPoint('drv_1', { lat: 200, long: 1 }), (e) => e.code === 'SHIFT_LOCATION');
+});
+
+test('setOdometer takes precedence over GPS-accumulated distance', () => {
+  const nowRef = { value: 1_700_000_000_000 };
+  const tracker = makeTracker(nowRef);
+  const shift = tracker.startShift('drv_1', { lat: 40.7128, long: -74.006 });
+
+  tracker.addGpsPoint('drv_1', { lat: 40.7128, long: -74.006 });
+  tracker.addGpsPoint('drv_1', { lat: 39.9526, long: -75.1652 });
+  const gpsOnly = tracker.getTripDistance('drv_1', shift.id);
+  assert.equal(gpsOnly.source, 'gps');
+
+  tracker.setOdometer('drv_1', { startMiles: 1000, endMiles: 1042.5 });
+  const withOverride = tracker.getTripDistance('drv_1', shift.id);
+  assert.equal(withOverride.source, 'odometer');
+  assert.equal(withOverride.distanceMiles, 42.5);
+});
+
+test('setOdometer validates readings', () => {
+  const nowRef = { value: 1_700_000_000_000 };
+  const tracker = makeTracker(nowRef);
+  tracker.startShift('drv_1', { lat: 1, long: 1 });
+  assert.throws(() => tracker.setOdometer('drv_1', { startMiles: -1, endMiles: 10 }), (e) => e.code === 'SHIFT_ODOMETER');
+  assert.throws(() => tracker.setOdometer('drv_1', { startMiles: 10, endMiles: 5 }), (e) => e.code === 'SHIFT_ODOMETER');
+});
