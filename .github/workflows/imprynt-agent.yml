@@ -72,6 +72,11 @@ jobs:
           prompt: |
             You are implementing a single ticket end to end in this repository.
 
+            If an AGENTS.md file exists at the repo root, read it first —
+            it has architecture notes and a "Decisions & Conventions Log"
+            of things previous tickets already learned about this codebase.
+            Use it instead of re-deriving the same context from scratch.
+
             Ticket: ${{ inputs.ticketTitle }}
             Location: ${{ inputs.ticketBreadcrumb }}
             Details:
@@ -81,6 +86,15 @@ jobs:
             test suite and fix any failures your change introduces — do not
             stop until the suite passes, or until you are confident the repo
             has no runnable test suite. Commit your work with a clear message.
+
+            Before committing, if you made a genuinely reusable decision
+            (a new shared module, a workaround for a specific issue, a
+            naming convention) that a future ticket would benefit from
+            knowing, add 1-3 short bullets under AGENTS.md's "Decisions &
+            Conventions Log" section. Skip this if there's nothing worth
+            remembering — do not log routine, ticket-specific details, and
+            prune anything in that section you notice is no longer true
+            rather than letting it grow unbounded.
 
             When you are done, report whether the test suite passed. Only
             report true if you actually ran it and it passed, or the repo
