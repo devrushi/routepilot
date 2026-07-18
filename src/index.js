@@ -87,3 +87,11 @@ export {
   LINK_STATUSES,
   DspError,
 } from './dsp.js';
+
+export {
+  createRouteHistorySyncWorker,
+  normalizeRoute,
+  normalizeStatus,
+  ROUTE_STATUSES,
+  RouteSyncError,
+} from './route-sync.js';

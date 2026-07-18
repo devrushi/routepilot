@@ -28,6 +28,7 @@ hashing (scrypt) are all built on Node's `crypto`.
 | `src/vehicles.js` | vehicle registry supporting multiple active vehicles with fuel/EV type fields |
 | `src/vehicle-lookup.js` | fetch vehicle specifications by license plate registration number |
 | `src/dsp.js` | partner DSP linking registry with variable payout rate cards |
+| `src/route-sync.js` | background worker syncing route histories from partner portals |
 | `src/index.js` | public API barrel |
 
 ### Session handling
