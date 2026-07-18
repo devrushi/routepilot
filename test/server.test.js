@@ -24,6 +24,12 @@ function postJson(baseUrl, path, body) {
   });
 }
 
+async function registerAndLogin(baseUrl, username = 'driver.jane', password = 'hunter2hunter2') {
+  await postJson(baseUrl, '/register', { username, password });
+  const res = await postJson(baseUrl, '/login', { username, password });
+  return res.json();
+}
+
 test('GET /health returns 200 with a status payload', async () => {
   await withServer(async (baseUrl) => {
     const res = await fetch(`${baseUrl}/health`);
@@ -135,4 +141,35 @@ test('POST /login/verify-totp completes an MFA-protected login', async () => {
     },
     { now: () => nowRef.value, sessionManager, authService },
   );
+});
+
+test('GET /dashboard returns a profile summary for a valid session', async () => {
+  await withServer(async (baseUrl) => {
+    const login = await registerAndLogin(baseUrl);
+    const res = await fetch(`${baseUrl}/dashboard`, {
+      headers: { Authorization: `Bearer ${login.tokens.accessToken}` },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.profile.username, 'driver.jane');
+    assert.equal(body.profile.mfaEnabled, false);
+    assert.ok(body.profile.id);
+    assert.ok(body.profile.createdAt);
+  });
+});
+
+test('GET /dashboard rejects a missing session token', async () => {
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/dashboard`);
+    assert.equal(res.status, 401);
+  });
+});
+
+test('GET /dashboard rejects an invalid session token', async () => {
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/dashboard`, {
+      headers: { Authorization: 'Bearer not-a-real-token' },
+    });
+    assert.equal(res.status, 401);
+  });
 });

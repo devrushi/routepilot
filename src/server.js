@@ -23,6 +23,7 @@ const AUTH_ERROR_STATUS = {
   AUTH_CHALLENGE_REPLAY: 401,
   AUTH_MFA_NOT_ENABLED: 400,
   AUTH_INVALID_MFA_CODE: 401,
+  AUTH_USER_NOT_FOUND: 404,
 };
 
 /**
@@ -51,10 +52,10 @@ export function createServer(config = {}) {
     }),
   } = config;
 
-  return createHttpServer(requestListener({ now, authService }));
+  return createHttpServer(requestListener({ now, sessionManager, authService }));
 }
 
-function requestListener({ now, authService }) {
+function requestListener({ now, sessionManager, authService }) {
   return async function handleRequest(req, res) {
     try {
       const { pathname } = new URL(req.url, 'http://localhost');
@@ -90,11 +91,56 @@ function requestListener({ now, authService }) {
         return;
       }
 
+      if (method === 'GET' && pathname === '/dashboard') {
+        await handleDashboard(req, res, { sessionManager, authService });
+        return;
+      }
+
       sendJson(res, 404, { error: 'Not Found' });
     } catch (err) {
       handleError(res, err);
     }
   };
+}
+
+async function handleDashboard(req, res, { sessionManager, authService }) {
+  const token = bearerToken(req);
+  if (!token) {
+    sendJson(res, 401, { error: 'Missing session token' });
+    return;
+  }
+
+  let payload;
+  try {
+    payload = sessionManager.verifyAccess(token);
+  } catch {
+    sendJson(res, 401, { error: 'Invalid or expired session' });
+    return;
+  }
+
+  const user = await authService.userStore.findById(payload.sub);
+  if (!user) {
+    sendJson(res, 401, { error: 'Invalid or expired session' });
+    return;
+  }
+
+  sendJson(res, 200, { profile: buildProfile(user) });
+}
+
+function buildProfile(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    mfaEnabled: user.mfa.enabled,
+    biometricEnrolled: Boolean(user.biometrics && user.biometrics.credentials.length > 0),
+    createdAt: new Date(user.createdAt).toISOString(),
+  };
+}
+
+function bearerToken(req) {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Bearer ')) return null;
+  return header.slice('Bearer '.length).trim() || null;
 }
 
 function readJsonBody(req) {
