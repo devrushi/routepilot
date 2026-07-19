@@ -155,3 +155,10 @@ export {
   assembleContext,
   TaxAssistantError,
 } from './tax-assistant.js';
+
+export {
+  detectCostAnomaly,
+  createRouteCostTracker,
+  DEFAULT_ANOMALY_THRESHOLD,
+  CostAnomalyError,
+} from './cost-anomaly.js';
