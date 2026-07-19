@@ -133,3 +133,10 @@ export {
   DEFAULT_JURISDICTION_TAX_CONFIG,
   TaxEstimationError,
 } from './tax-estimation.js';
+
+export {
+  createEstimatedPaymentTracker,
+  getQuarterlyDueDates,
+  nextDueDate,
+  EstimatedPaymentError,
+} from './estimated-payments.js';
