@@ -192,3 +192,10 @@ export {
   renderPdf,
   ExportError,
 } from './exports.js';
+
+export {
+  createSignedExportLinkService,
+  createScheduledExportEmailWorker,
+  createMockEmailProvider,
+  ExportLinkError,
+} from './export-links.js';
