@@ -162,3 +162,12 @@ export {
   DEFAULT_ANOMALY_THRESHOLD,
   CostAnomalyError,
 } from './cost-anomaly.js';
+
+export {
+  createNotificationScheduler,
+  createMockPushProvider,
+  shiftMissingMileage,
+  receiptOverdue,
+  DEFAULT_RECEIPT_WINDOW_MS,
+  NotificationError,
+} from './notifications.js';
