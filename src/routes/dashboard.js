@@ -5,7 +5,7 @@ export function registerDashboardRoutes(router, { sessionManager, authService })
   registerErrorStatuses(AnalyticsError, 400);
 
   router.get('/dashboard', async (req, res) => {
-    const payload = requireSession(req, res, sessionManager);
+    const payload = await requireSession(req, res, sessionManager);
     if (!payload) return;
 
     const user = await authService.userStore.findById(payload.sub);
@@ -22,7 +22,7 @@ export function registerDashboardRoutes(router, { sessionManager, authService })
   // aren't persisted anywhere yet in this repo, so the caller supplies them
   // directly rather than this route looking them up itself.
   router.post('/dashboard/weekly-profit', async (req, res) => {
-    const payload = requireSession(req, res, sessionManager);
+    const payload = await requireSession(req, res, sessionManager);
     if (!payload) return;
 
     const { earnings = [], expenses = [] } = await readJsonBody(req);

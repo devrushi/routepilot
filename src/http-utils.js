@@ -51,14 +51,16 @@ export function bearerToken(req) {
  * 401 itself on missing/invalid tokens. Returns the access-token payload,
  * or `null` (the caller should just return — the response is already sent).
  */
-export function requireSession(req, res, sessionManager) {
+export async function requireSession(req, res, sessionManager) {
   const token = bearerToken(req);
   if (!token) {
     sendJson(res, 401, { error: 'Missing session token' });
     return null;
   }
   try {
-    return sessionManager.verifyAccess(token);
+    // Awaited inside the try, not just returned — a rejected promise must
+    // be caught right here, not propagate to the caller as a thrown error.
+    return await sessionManager.verifyAccess(token);
   } catch {
     sendJson(res, 401, { error: 'Invalid or expired session' });
     return null;

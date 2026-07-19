@@ -27,7 +27,7 @@ test('register + login without MFA yields a session', async () => {
   const result = await auth.login('driver.jane', 'hunter2hunter2');
   assert.equal(result.status, 'authenticated');
   assert.ok(result.tokens.accessToken);
-  assert.equal(sessionManager.verifyAccess(result.tokens.accessToken).sub, user.id);
+  assert.equal((await sessionManager.verifyAccess(result.tokens.accessToken)).sub, user.id);
 });
 
 test('login rejects a wrong password with a uniform error', async () => {
@@ -83,7 +83,7 @@ test('with MFA enabled, login becomes a two-step challenge flow', async () => {
   const code = generateTOTP(secret, { now: nowRef.value });
   const step2 = await auth.verifyMfa(step1.mfaToken, code);
   assert.equal(step2.status, 'authenticated');
-  assert.equal(sessionManager.verifyAccess(step2.tokens.accessToken).sub, user.id);
+  assert.equal((await sessionManager.verifyAccess(step2.tokens.accessToken)).sub, user.id);
 });
 
 test('an expired MFA challenge token is rejected', async () => {
@@ -142,9 +142,9 @@ test('end-to-end: register -> enroll -> login(mfa) -> refresh -> logout', async 
   const step1 = await auth.login('driver.jane', 'hunter2hunter2');
   const { tokens } = await auth.verifyMfa(step1.mfaToken, generateTOTP(secret, { now: nowRef.value }));
 
-  const rotated = auth.refresh(tokens.refreshToken);
-  assert.equal(sessionManager.verifyAccess(rotated.accessToken).sub, user.id);
+  const rotated = await auth.refresh(tokens.refreshToken);
+  assert.equal((await sessionManager.verifyAccess(rotated.accessToken)).sub, user.id);
 
-  assert.equal(auth.logout(rotated.accessToken), true);
-  assert.throws(() => sessionManager.verifyAccess(rotated.accessToken), (e) => e.code === 'SESSION_REVOKED');
+  assert.equal(await auth.logout(rotated.accessToken), true);
+  await assert.rejects(() => sessionManager.verifyAccess(rotated.accessToken), (e) => e.code === 'SESSION_REVOKED');
 });

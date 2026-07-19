@@ -252,7 +252,7 @@ test('passwordless biometric login yields a session', async () => {
   });
   assert.equal(result.status, 'authenticated');
   assert.equal(result.usedBiometric, true);
-  assert.equal(sessionManager.verifyAccess(result.tokens.accessToken).sub, user.id);
+  assert.equal((await sessionManager.verifyAccess(result.tokens.accessToken)).sub, user.id);
 
   const stored = await auth.userStore.findById(user.id);
   assert.equal(stored.biometrics.credentials[0].signCount, 1);
@@ -347,7 +347,7 @@ test('biometrics can satisfy the MFA challenge in place of TOTP', async () => {
     signature: device.sign(step1.mfaToken),
   });
   assert.equal(step2.status, 'authenticated');
-  assert.equal(sessionManager.verifyAccess(step2.tokens.accessToken).sub, user.id);
+  assert.equal((await sessionManager.verifyAccess(step2.tokens.accessToken)).sub, user.id);
 });
 
 // ---------------------------------------------------------------------------

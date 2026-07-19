@@ -227,7 +227,7 @@ export function createAuthService(config = {}) {
     return {
       status: 'authenticated',
       user: sanitize(user),
-      tokens: sessionManager.issue(user.id, extraClaims),
+      tokens: await sessionManager.issue(user.id, extraClaims),
     };
   }
 
@@ -258,7 +258,7 @@ export function createAuthService(config = {}) {
       return {
         status: 'authenticated',
         user: sanitize(user),
-        tokens: sessionManager.issue(user.id, extraClaims),
+        tokens: await sessionManager.issue(user.id, extraClaims),
       };
     }
 
@@ -277,7 +277,7 @@ export function createAuthService(config = {}) {
           status: 'authenticated',
           user: sanitize(user),
           usedRecoveryCode: true,
-          tokens: sessionManager.issue(user.id, extraClaims),
+          tokens: await sessionManager.issue(user.id, extraClaims),
         };
       }
     }
@@ -510,7 +510,7 @@ export function createAuthService(config = {}) {
       user: sanitize(user),
       usedBiometric: true,
       credentialId,
-      tokens: sessionManager.issue(user.id, extraClaims),
+      tokens: await sessionManager.issue(user.id, extraClaims),
     };
   }
 

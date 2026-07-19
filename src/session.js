@@ -6,6 +6,15 @@
 // refresh token is detected and the whole session can be revoked. Access
 // tokens are stateless but carry a `sid` that is checked against the store's
 // revocation flag, giving immediate logout.
+//
+// Storage is a `repo`: `{ insert, findBySid, update }`, async so it can be
+// backed by Postgres in production (createPostgresSessionRepo) or an
+// in-memory Map in tests/local dev (createInMemorySessionRepo, the
+// default) — same pattern as auth.js's createInMemoryUserStore. Both repos
+// return copies, never live references, so a caller MUST call `update()` to
+// persist a mutation — this keeps the two implementations behaviorally
+// identical rather than letting the in-memory one accidentally auto-persist
+// via reference mutation.
 
 import { randomUUID } from 'node:crypto';
 import { JwtError, signJwt, verifyJwt } from './jwt.js';
@@ -21,6 +30,61 @@ export class SessionError extends Error {
   }
 }
 
+/** In-memory session repo (default) — Map-backed, async interface. */
+export function createInMemorySessionRepo() {
+  const sessions = new Map();
+  return {
+    async insert(session) {
+      sessions.set(session.sid, { ...session });
+    },
+    async findBySid(sid) {
+      const session = sessions.get(sid);
+      return session ? { ...session } : null;
+    },
+    async update(session) {
+      sessions.set(session.sid, { ...session });
+    },
+  };
+}
+
+/**
+ * Postgres-backed session repo. Expects a `sessions` table
+ * (see db/migrations) with columns `sid, subject, refresh_jti, revoked,
+ * created_at`.
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresSessionRepo(sql) {
+  function fromRow(row) {
+    return {
+      sid: row.sid,
+      subject: row.subject,
+      refreshJti: row.refresh_jti,
+      revoked: row.revoked,
+      createdAt: Number(row.created_at),
+    };
+  }
+  return {
+    async insert(session) {
+      await sql`
+        INSERT INTO sessions (sid, subject, refresh_jti, revoked, created_at)
+        VALUES (${session.sid}, ${session.subject}, ${session.refreshJti}, ${session.revoked}, ${session.createdAt})
+      `;
+    },
+    async findBySid(sid) {
+      const rows = await sql`
+        SELECT sid, subject, refresh_jti, revoked, created_at FROM sessions WHERE sid = ${sid} LIMIT 1
+      `;
+      return rows[0] ? fromRow(rows[0]) : null;
+    },
+    async update(session) {
+      await sql`
+        UPDATE sessions SET refresh_jti = ${session.refreshJti}, revoked = ${session.revoked}
+        WHERE sid = ${session.sid}
+      `;
+    },
+  };
+}
+
 /**
  * Create a session manager.
  * @param {object} config
@@ -29,7 +93,7 @@ export class SessionError extends Error {
  * @param {number} [config.accessTtlSeconds=900] Access token lifetime (15 min).
  * @param {number} [config.refreshTtlSeconds=2592000] Refresh lifetime (30 days).
  * @param {string} [config.issuer='routepilot'] `iss` claim.
- * @param {Map} [config.store] Session record store (defaults to in-memory Map).
+ * @param {{insert:Function, findBySid:Function, update:Function}} [config.repo] Session repo (defaults to an in-memory one).
  * @param {() => number} [config.now] Clock in ms (injectable for tests).
  */
 export function createSessionManager(config = {}) {
@@ -39,7 +103,7 @@ export function createSessionManager(config = {}) {
     accessTtlSeconds = 15 * 60,
     refreshTtlSeconds = 30 * 24 * 60 * 60,
     issuer = 'routepilot',
-    store = new Map(),
+    repo = createInMemorySessionRepo(),
     now = () => Date.now(),
   } = config;
 
@@ -80,9 +144,9 @@ export function createSessionManager(config = {}) {
    * Start a new session for a subject (user id).
    * @param {string} subject
    * @param {object} [extraClaims] Extra claims embedded in the access token.
-   * @returns {object} Token pair + metadata.
+   * @returns {Promise<object>} Token pair + metadata.
    */
-  function issue(subject, extraClaims = {}) {
+  async function issue(subject, extraClaims = {}) {
     if (!subject) {
       throw new SessionError('A subject is required to issue a session', 'SESSION_SUBJECT');
     }
@@ -93,17 +157,17 @@ export function createSessionManager(config = {}) {
       revoked: false,
       createdAt: now(),
     };
-    store.set(session.sid, session);
+    await repo.insert(session);
     return mint(session, extraClaims);
   }
 
   /**
    * Verify an access token and ensure its session is still active.
    * @param {string} token
-   * @returns {object} Verified access-token payload.
+   * @returns {Promise<object>} Verified access-token payload.
    * @throws {SessionError}
    */
-  function verifyAccess(token) {
+  async function verifyAccess(token) {
     let payload;
     try {
       payload = verifyJwt(token, accessSecret, { now: nowSeconds() });
@@ -116,7 +180,7 @@ export function createSessionManager(config = {}) {
     if (payload.typ !== ACCESS_TYP) {
       throw new SessionError('Not an access token', 'SESSION_WRONG_TYPE');
     }
-    const session = store.get(payload.sid);
+    const session = await repo.findBySid(payload.sid);
     if (!session || session.revoked) {
       throw new SessionError('Session has been revoked', 'SESSION_REVOKED');
     }
@@ -129,10 +193,10 @@ export function createSessionManager(config = {}) {
    * session is revoked and an error is thrown.
    * @param {string} token
    * @param {object} [extraClaims]
-   * @returns {object} New token pair.
+   * @returns {Promise<object>} New token pair.
    * @throws {SessionError}
    */
-  function refresh(token, extraClaims = {}) {
+  async function refresh(token, extraClaims = {}) {
     let payload;
     try {
       payload = verifyJwt(token, refreshSecret, { now: nowSeconds(), issuer });
@@ -145,7 +209,7 @@ export function createSessionManager(config = {}) {
     if (payload.typ !== REFRESH_TYP) {
       throw new SessionError('Not a refresh token', 'SESSION_WRONG_TYPE');
     }
-    const session = store.get(payload.sid);
+    const session = await repo.findBySid(payload.sid);
     if (!session || session.revoked) {
       throw new SessionError('Session has been revoked', 'SESSION_REVOKED');
     }
@@ -153,21 +217,24 @@ export function createSessionManager(config = {}) {
       // A valid signature but stale jti means this token was already rotated
       // out — a replay. Kill the session defensively.
       session.revoked = true;
+      await repo.update(session);
       throw new SessionError('Refresh token reuse detected', 'SESSION_REPLAY');
     }
     session.refreshJti = randomUUID();
+    await repo.update(session);
     return mint(session, extraClaims);
   }
 
   /**
    * Revoke a session by its id (logout).
    * @param {string} sid
-   * @returns {boolean} Whether a session was found and revoked.
+   * @returns {Promise<boolean>} Whether a session was found and revoked.
    */
-  function revoke(sid) {
-    const session = store.get(sid);
+  async function revoke(sid) {
+    const session = await repo.findBySid(sid);
     if (!session) return false;
     session.revoked = true;
+    await repo.update(session);
     return true;
   }
 
@@ -175,22 +242,22 @@ export function createSessionManager(config = {}) {
    * Revoke the session that owns a given (access or refresh) token, without
    * requiring the token to be unexpired.
    * @param {string} token
-   * @returns {boolean}
+   * @returns {Promise<boolean>}
    */
-  function revokeByToken(token) {
+  async function revokeByToken(token) {
     try {
       const parts = token.split('.');
       const payload = JSON.parse(Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
-      return payload.sid ? revoke(payload.sid) : false;
+      return payload.sid ? await revoke(payload.sid) : false;
     } catch {
       return false;
     }
   }
 
-  function isActive(sid) {
-    const session = store.get(sid);
+  async function isActive(sid) {
+    const session = await repo.findBySid(sid);
     return Boolean(session && !session.revoked);
   }
 
-  return { issue, verifyAccess, refresh, revoke, revokeByToken, isActive, store };
+  return { issue, verifyAccess, refresh, revoke, revokeByToken, isActive, repo };
 }

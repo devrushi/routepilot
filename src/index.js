@@ -19,7 +19,12 @@ export {
 
 export { hashPassword, verifyPassword } from './password.js';
 
-export { createSessionManager, SessionError } from './session.js';
+export {
+  createSessionManager,
+  createInMemorySessionRepo,
+  createPostgresSessionRepo,
+  SessionError,
+} from './session.js';
 
 export {
   createAuthService,
