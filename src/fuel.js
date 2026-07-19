@@ -6,6 +6,12 @@
 // at write time — amounts to a base currency, fuel volume to liters — so
 // downstream reporting (expense totals, cost-per-mile, anomaly checks) never
 // has to re-derive comparable units from mixed currencies/unit systems.
+//
+// Logs are insert-only (never mutated after creation), so the repo is
+// simpler than shifts.js/session.js's: just `insert`/`findById`/
+// `listByDriver`, no `update`. Async so it can be backed by Postgres in
+// production (createPostgresFuelRepo) or an in-memory Map in tests/local
+// dev (createInMemoryFuelRepo, the default).
 
 import { randomUUID } from 'node:crypto';
 
@@ -118,33 +124,91 @@ function deepFreeze(obj) {
   return obj;
 }
 
+/** In-memory fuel log repo (default) — nested Map-backed, async interface. */
+export function createInMemoryFuelRepo() {
+  const byDriver = new Map(); // driverId -> Map(id -> record)
+
+  function driverLogs(driverId) {
+    let logs = byDriver.get(driverId);
+    if (!logs) {
+      logs = new Map();
+      byDriver.set(driverId, logs);
+    }
+    return logs;
+  }
+
+  return {
+    async insert(record) {
+      driverLogs(record.driverId).set(record.id, structuredClone(record));
+    },
+    async findById(driverId, id) {
+      const logs = byDriver.get(driverId);
+      const record = logs && logs.get(id);
+      return record ? structuredClone(record) : null;
+    },
+    async listByDriver(driverId, filter = {}) {
+      const logs = byDriver.get(driverId);
+      if (!logs) return [];
+      let records = [...logs.values()].sort((a, b) => a.at - b.at);
+      if (filter.type !== undefined) {
+        records = records.filter((r) => r.type === filter.type);
+      }
+      return records.map((r) => structuredClone(r));
+    },
+  };
+}
+
+function parseJsonColumn(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+/**
+ * Postgres-backed fuel log repo. Expects a `fuel_logs` table (see
+ * db/migrations) with the full record stored as JSONB (`data`) alongside
+ * indexed `driver_id`/`type`/`at` columns for filtering/sorting.
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresFuelRepo(sql) {
+  function fromRow(row) {
+    return { ...parseJsonColumn(row.data, {}), id: row.id, driverId: row.driver_id, type: row.type, at: Number(row.at) };
+  }
+
+  return {
+    async insert(record) {
+      await sql`
+        INSERT INTO fuel_logs (id, driver_id, type, at, data)
+        VALUES (${record.id}, ${record.driverId}, ${record.type}, ${record.at}, ${JSON.stringify(record)}::jsonb)
+      `;
+    },
+    async findById(driverId, id) {
+      const rows = await sql`SELECT * FROM fuel_logs WHERE driver_id = ${driverId} AND id = ${id} LIMIT 1`;
+      return rows[0] ? fromRow(rows[0]) : null;
+    },
+    async listByDriver(driverId, filter = {}) {
+      const rows = filter.type !== undefined
+        ? await sql`SELECT * FROM fuel_logs WHERE driver_id = ${driverId} AND type = ${filter.type} ORDER BY at ASC`
+        : await sql`SELECT * FROM fuel_logs WHERE driver_id = ${driverId} ORDER BY at ASC`;
+      return rows.map(fromRow);
+    },
+  };
+}
+
 /**
  * Create the fuel/charging session logger.
  * @param {object} [config]
- * @param {Map} [config.store] Per-driver log store (defaults in-memory).
+ * @param {{insert:Function, findById:Function, listByDriver:Function}} [config.repo] Fuel log repo (defaults to an in-memory one).
  * @param {() => number} [config.now] Clock in ms (injectable for tests).
  * @param {() => string} [config.generateId] Record id generator.
  * @param {Record<string, number>} [config.rates] Exchange rates for currency normalization.
  */
 export function createFuelLogger(config = {}) {
   const {
-    store = new Map(),
+    repo = createInMemoryFuelRepo(),
     now = () => Date.now(),
     generateId = () => `fuel_${randomUUID()}`,
     rates = DEFAULT_EXCHANGE_RATES,
   } = config;
-
-  function requireDriverLogs(driverId) {
-    if (!driverId) {
-      throw new FuelError('A driverId is required', 'FUEL_DRIVER');
-    }
-    let logs = store.get(driverId);
-    if (!logs) {
-      logs = new Map();
-      store.set(driverId, logs);
-    }
-    return logs;
-  }
 
   function snapshot(record) {
     return deepFreeze(structuredClone(record));
@@ -159,10 +223,12 @@ export function createFuelLogger(config = {}) {
    * @param {number} input.volume Fuel volume.
    * @param {string} input.unit 'liter' or 'gallon'.
    * @param {number} [input.at] Timestamp override (ms since epoch).
-   * @returns {object} The stored, frozen log record.
+   * @returns {Promise<object>} The stored, frozen log record.
    */
-  function logFuelPurchase(driverId, input = {}) {
-    const logs = requireDriverLogs(driverId);
+  async function logFuelPurchase(driverId, input = {}) {
+    if (!driverId) {
+      throw new FuelError('A driverId is required', 'FUEL_DRIVER');
+    }
     const amount = validateAmount(input.amount, 'amount', 'FUEL_AMOUNT');
     const currency = normalizeCurrencyCode(input.currency);
     const volume = validateAmount(input.volume, 'volume', 'FUEL_VOLUME');
@@ -180,7 +246,7 @@ export function createFuelLogger(config = {}) {
       volumeLiters: convertVolume(volume, unit, 'liter'),
       at: input.at ?? now(),
     };
-    logs.set(record.id, record);
+    await repo.insert(record);
     return snapshot(record);
   }
 
@@ -192,10 +258,12 @@ export function createFuelLogger(config = {}) {
    * @param {string} input.currency ISO 4217 code.
    * @param {number} input.kWh Energy delivered.
    * @param {number} [input.at] Timestamp override (ms since epoch).
-   * @returns {object} The stored, frozen log record.
+   * @returns {Promise<object>} The stored, frozen log record.
    */
-  function logChargingSession(driverId, input = {}) {
-    const logs = requireDriverLogs(driverId);
+  async function logChargingSession(driverId, input = {}) {
+    if (!driverId) {
+      throw new FuelError('A driverId is required', 'FUEL_DRIVER');
+    }
     const cost = validateAmount(input.cost, 'cost', 'FUEL_AMOUNT');
     const currency = normalizeCurrencyCode(input.currency);
     const kWh = validateAmount(input.kWh, 'kWh', 'FUEL_KWH');
@@ -210,14 +278,13 @@ export function createFuelLogger(config = {}) {
       kWh,
       at: input.at ?? now(),
     };
-    logs.set(record.id, record);
+    await repo.insert(record);
     return snapshot(record);
   }
 
   /** Get one log record, or `null`. */
-  function get(driverId, id) {
-    const logs = store.get(driverId);
-    const record = logs && logs.get(id);
+  async function get(driverId, id) {
+    const record = await repo.findById(driverId, id);
     return record ? snapshot(record) : null;
   }
 
@@ -227,15 +294,10 @@ export function createFuelLogger(config = {}) {
    * @param {object} [filter]
    * @param {'fuel'|'charging'} [filter.type]
    */
-  function list(driverId, filter = {}) {
-    const logs = store.get(driverId);
-    if (!logs) return [];
-    let records = [...logs.values()].sort((a, b) => a.at - b.at);
-    if (filter.type !== undefined) {
-      records = records.filter((r) => r.type === filter.type);
-    }
+  async function list(driverId, filter = {}) {
+    const records = await repo.listByDriver(driverId, filter);
     return records.map(snapshot);
   }
 
-  return { logFuelPurchase, logChargingSession, get, list, store };
+  return { logFuelPurchase, logChargingSession, get, list, repo };
 }

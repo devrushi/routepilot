@@ -9,26 +9,26 @@ import {
 import { createShiftTracker } from '../src/shifts.js';
 import { createReceiptProcessor } from '../src/receipts.js';
 
-test('shiftMissingMileage flags a completed shift with no GPS or odometer data', () => {
+test('shiftMissingMileage flags a completed shift with no GPS or odometer data', async () => {
   const tracker = createShiftTracker({ now: () => 1_700_000_000_000 });
-  tracker.startShift('drv_1', { lat: 1, long: 1 });
-  const shift = tracker.endShift('drv_1', { lat: 1, long: 1 });
+  await tracker.startShift('drv_1', { lat: 1, long: 1 });
+  const shift = await tracker.endShift('drv_1', { lat: 1, long: 1 });
   assert.equal(shiftMissingMileage(shift), true);
 });
 
-test('shiftMissingMileage does not flag a shift with GPS distance, an odometer reading, or one still active', () => {
+test('shiftMissingMileage does not flag a shift with GPS distance, an odometer reading, or one still active', async () => {
   const tracker = createShiftTracker({ now: () => 1_700_000_000_000 });
-  const active = tracker.startShift('drv_1', { lat: 1, long: 1 });
+  const active = await tracker.startShift('drv_1', { lat: 1, long: 1 });
   assert.equal(shiftMissingMileage(active), false); // still active
 
-  tracker.addGpsPoint('drv_1', { lat: 1, long: 1 });
-  tracker.addGpsPoint('drv_1', { lat: 1.01, long: 1.01 });
-  const withGps = tracker.endShift('drv_1', { lat: 1.01, long: 1.01 });
+  await tracker.addGpsPoint('drv_1', { lat: 1, long: 1 });
+  await tracker.addGpsPoint('drv_1', { lat: 1.01, long: 1.01 });
+  const withGps = await tracker.endShift('drv_1', { lat: 1.01, long: 1.01 });
   assert.equal(shiftMissingMileage(withGps), false);
 
-  tracker.startShift('drv_2', { lat: 1, long: 1 });
-  tracker.setOdometer('drv_2', { startMiles: 100, endMiles: 110 });
-  const withOdometer = tracker.endShift('drv_2', { lat: 1, long: 1 });
+  await tracker.startShift('drv_2', { lat: 1, long: 1 });
+  await tracker.setOdometer('drv_2', { startMiles: 100, endMiles: 110 });
+  const withOdometer = await tracker.endShift('drv_2', { lat: 1, long: 1 });
   assert.equal(shiftMissingMileage(withOdometer), false);
 });
 
@@ -45,8 +45,8 @@ test('receiptOverdue fires only once the window has elapsed with no matching rec
 
 test('sweepDriver sends a missing-mileage notification for a shift with no mileage logged', async () => {
   const shiftTracker = createShiftTracker({ now: () => 1_700_000_000_000 });
-  shiftTracker.startShift('drv_1', { lat: 1, long: 1 });
-  shiftTracker.endShift('drv_1', { lat: 1, long: 1 });
+  await shiftTracker.startShift('drv_1', { lat: 1, long: 1 });
+  await shiftTracker.endShift('drv_1', { lat: 1, long: 1 });
 
   const pushProvider = createMockPushProvider();
   const scheduler = createNotificationScheduler({ pushProvider, shiftTracker, now: () => 1_700_000_100_000 });
@@ -59,9 +59,9 @@ test('sweepDriver sends a missing-mileage notification for a shift with no milea
 
 test('sweepDriver does not send a notification when a shift has mileage logged', async () => {
   const shiftTracker = createShiftTracker({ now: () => 1_700_000_000_000 });
-  shiftTracker.startShift('drv_1', { lat: 1, long: 1 });
-  shiftTracker.setOdometer('drv_1', { startMiles: 0, endMiles: 12 });
-  shiftTracker.endShift('drv_1', { lat: 1, long: 1 });
+  await shiftTracker.startShift('drv_1', { lat: 1, long: 1 });
+  await shiftTracker.setOdometer('drv_1', { startMiles: 0, endMiles: 12 });
+  await shiftTracker.endShift('drv_1', { lat: 1, long: 1 });
 
   const pushProvider = createMockPushProvider();
   const scheduler = createNotificationScheduler({ pushProvider, shiftTracker, now: () => 1_700_000_100_000 });

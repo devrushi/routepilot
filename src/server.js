@@ -10,12 +10,16 @@
 import { createServer as createHttpServer } from 'node:http';
 import { createSessionManager } from './session.js';
 import { createAuthService } from './auth.js';
+import { createShiftTracker, createPostgresShiftRepo } from './shifts.js';
+import { createFuelLogger, createPostgresFuelRepo } from './fuel.js';
 import { createDbClient } from './db.js';
 import { createRouter } from './router.js';
 import { sendJson, handleError } from './http-utils.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerDashboardRoutes } from './routes/dashboard.js';
+import { registerShiftRoutes } from './routes/shifts.js';
+import { registerFuelRoutes } from './routes/fuel.js';
 
 export const DEFAULT_PORT = 3000;
 
@@ -56,8 +60,10 @@ function resolveServices(config = {}) {
       challengeSecret: envSecret('AUTH_CHALLENGE_SECRET'),
       now,
     }),
+    shiftTracker = createShiftTracker({ now, repo: db ? createPostgresShiftRepo(db) : undefined }),
+    fuelLogger = createFuelLogger({ now, repo: db ? createPostgresFuelRepo(db) : undefined }),
   } = config;
-  return { now, db, sessionManager, authService };
+  return { now, db, sessionManager, authService, shiftTracker, fuelLogger };
 }
 
 function buildRouter(services) {
@@ -65,6 +71,8 @@ function buildRouter(services) {
   registerHealthRoutes(router, services);
   registerAuthRoutes(router, services);
   registerDashboardRoutes(router, services);
+  registerShiftRoutes(router, services);
+  registerFuelRoutes(router, services);
   return router;
 }
 
@@ -102,6 +110,8 @@ export function createRequestHandler(config = {}) {
  * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>|null} [config.db]
  * @param {ReturnType<import('./session.js').createSessionManager>} [config.sessionManager]
  * @param {ReturnType<import('./auth.js').createAuthService>} [config.authService]
+ * @param {ReturnType<import('./shifts.js').createShiftTracker>} [config.shiftTracker]
+ * @param {ReturnType<import('./fuel.js').createFuelLogger>} [config.fuelLogger]
  * @returns {import('node:http').Server}
  */
 export function createServer(config = {}) {

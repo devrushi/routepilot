@@ -6,6 +6,13 @@
 // server never geolocates on its own — lat/long always comes from the
 // caller, matching how the mobile app already has GPS access). Only one
 // shift can be open per driver at a time.
+//
+// Storage is a `repo`: `{ insert, findActiveByDriver, findById, update,
+// listByDriver }`, async so it can be backed by Postgres in production
+// (createPostgresShiftRepo) or an in-memory Map in tests/local dev
+// (createInMemoryShiftRepo, the default) — same pattern as session.js.
+// Both repos return copies, never live references — a caller must call
+// `repo.update()` to persist a mutation to breaks/waits/trip/status.
 
 import { randomUUID } from 'node:crypto';
 
@@ -63,40 +70,125 @@ function deepFreeze(obj) {
   return obj;
 }
 
+/** In-memory shift repo (default) — nested Map-backed, async interface. */
+export function createInMemoryShiftRepo() {
+  const byDriver = new Map(); // driverId -> Map(shiftId -> record)
+
+  function driverShifts(driverId) {
+    let shifts = byDriver.get(driverId);
+    if (!shifts) {
+      shifts = new Map();
+      byDriver.set(driverId, shifts);
+    }
+    return shifts;
+  }
+
+  return {
+    async insert(record) {
+      driverShifts(record.driverId).set(record.id, structuredClone(record));
+    },
+    async findActiveByDriver(driverId) {
+      const shifts = byDriver.get(driverId);
+      if (!shifts) return null;
+      for (const shift of shifts.values()) {
+        if (shift.status === 'active') return structuredClone(shift);
+      }
+      return null;
+    },
+    async findById(driverId, shiftId) {
+      const shifts = byDriver.get(driverId);
+      const record = shifts && shifts.get(shiftId);
+      return record ? structuredClone(record) : null;
+    },
+    async update(record) {
+      driverShifts(record.driverId).set(record.id, structuredClone(record));
+    },
+    async listByDriver(driverId) {
+      const shifts = byDriver.get(driverId);
+      if (!shifts) return [];
+      return [...shifts.values()].sort((a, b) => a.startedAt - b.startedAt).map((r) => structuredClone(r));
+    },
+  };
+}
+
+function parseJsonColumn(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+/**
+ * Postgres-backed shift repo. Expects a `shifts` table (see db/migrations)
+ * with `breaks`/`waits`/`trip`/location fields as JSONB.
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresShiftRepo(sql) {
+  function fromRow(row) {
+    return {
+      id: row.id,
+      driverId: row.driver_id,
+      status: row.status,
+      startedAt: Number(row.started_at),
+      startLocation: parseJsonColumn(row.start_location, null),
+      endedAt: row.ended_at === null ? null : Number(row.ended_at),
+      endLocation: parseJsonColumn(row.end_location, null),
+      breaks: parseJsonColumn(row.breaks, []),
+      waits: parseJsonColumn(row.waits, []),
+      trip: parseJsonColumn(row.trip, { gpsPoints: [], gpsDistanceMiles: 0, odometer: null }),
+    };
+  }
+
+  return {
+    async insert(record) {
+      await sql`
+        INSERT INTO shifts (id, driver_id, status, started_at, start_location, ended_at, end_location, breaks, waits, trip)
+        VALUES (
+          ${record.id}, ${record.driverId}, ${record.status}, ${record.startedAt},
+          ${JSON.stringify(record.startLocation)}::jsonb, ${record.endedAt},
+          ${record.endLocation ? JSON.stringify(record.endLocation) : null}::jsonb,
+          ${JSON.stringify(record.breaks)}::jsonb, ${JSON.stringify(record.waits)}::jsonb, ${JSON.stringify(record.trip)}::jsonb
+        )
+      `;
+    },
+    async findActiveByDriver(driverId) {
+      const rows = await sql`SELECT * FROM shifts WHERE driver_id = ${driverId} AND status = 'active' LIMIT 1`;
+      return rows[0] ? fromRow(rows[0]) : null;
+    },
+    async findById(driverId, shiftId) {
+      const rows = await sql`SELECT * FROM shifts WHERE driver_id = ${driverId} AND id = ${shiftId} LIMIT 1`;
+      return rows[0] ? fromRow(rows[0]) : null;
+    },
+    async update(record) {
+      await sql`
+        UPDATE shifts SET
+          status = ${record.status},
+          ended_at = ${record.endedAt},
+          end_location = ${record.endLocation ? JSON.stringify(record.endLocation) : null}::jsonb,
+          breaks = ${JSON.stringify(record.breaks)}::jsonb,
+          waits = ${JSON.stringify(record.waits)}::jsonb,
+          trip = ${JSON.stringify(record.trip)}::jsonb
+        WHERE id = ${record.id}
+      `;
+    },
+    async listByDriver(driverId) {
+      const rows = await sql`SELECT * FROM shifts WHERE driver_id = ${driverId} ORDER BY started_at ASC`;
+      return rows.map(fromRow);
+    },
+  };
+}
+
 /**
  * Create the shift tracker.
  * @param {object} [config]
- * @param {Map} [config.store] Per-driver shift store (defaults in-memory).
+ * @param {{insert:Function, findActiveByDriver:Function, findById:Function, update:Function, listByDriver:Function}} [config.repo] Shift repo (defaults to an in-memory one).
  * @param {() => number} [config.now] Clock in ms (injectable for tests).
  * @param {() => string} [config.generateId] Shift id generator.
  */
 export function createShiftTracker(config = {}) {
   const {
-    store = new Map(),
+    repo = createInMemoryShiftRepo(),
     now = () => Date.now(),
     generateId = () => `shift_${randomUUID()}`,
   } = config;
-
-  function requireDriverShifts(driverId) {
-    if (!driverId) {
-      throw new ShiftError('A driverId is required', 'SHIFT_DRIVER');
-    }
-    let shifts = store.get(driverId);
-    if (!shifts) {
-      shifts = new Map();
-      store.set(driverId, shifts);
-    }
-    return shifts;
-  }
-
-  function findActive(driverId) {
-    const shifts = store.get(driverId);
-    if (!shifts) return null;
-    for (const shift of shifts.values()) {
-      if (shift.status === 'active') return shift;
-    }
-    return null;
-  }
 
   function snapshot(record) {
     return deepFreeze(structuredClone(record));
@@ -109,11 +201,13 @@ export function createShiftTracker(config = {}) {
    * @param {number} input.lat
    * @param {number} input.long
    * @param {number} [input.at] Timestamp override (ms since epoch).
-   * @returns {object} The new, frozen shift record.
+   * @returns {Promise<object>} The new, frozen shift record.
    */
-  function startShift(driverId, input = {}) {
-    const shifts = requireDriverShifts(driverId);
-    if (findActive(driverId)) {
+  async function startShift(driverId, input = {}) {
+    if (!driverId) {
+      throw new ShiftError('A driverId is required', 'SHIFT_DRIVER');
+    }
+    if (await repo.findActiveByDriver(driverId)) {
       throw new ShiftError(`Driver "${driverId}" already has an active shift`, 'SHIFT_ALREADY_ACTIVE');
     }
     const location = validateLocation(input);
@@ -130,7 +224,7 @@ export function createShiftTracker(config = {}) {
       waits: [],
       trip: { gpsPoints: [], gpsDistanceMiles: 0, odometer: null },
     };
-    shifts.set(record.id, record);
+    await repo.insert(record);
     return snapshot(record);
   }
 
@@ -141,11 +235,11 @@ export function createShiftTracker(config = {}) {
    * @param {number} input.lat
    * @param {number} input.long
    * @param {number} [input.at] Timestamp override (ms since epoch).
-   * @returns {object} The updated, frozen shift record.
+   * @returns {Promise<object>} The updated, frozen shift record.
    * @throws {ShiftError} `SHIFT_NOT_ACTIVE` if the driver has no open shift.
    */
-  function endShift(driverId, input = {}) {
-    const record = findActive(driverId);
+  async function endShift(driverId, input = {}) {
+    const record = await repo.findActiveByDriver(driverId);
     if (!record) {
       throw new ShiftError(`Driver "${driverId}" has no active shift`, 'SHIFT_NOT_ACTIVE');
     }
@@ -153,6 +247,7 @@ export function createShiftTracker(config = {}) {
     record.status = 'completed';
     record.endedAt = input.at ?? now();
     record.endLocation = location;
+    await repo.update(record);
     return snapshot(record);
   }
 
@@ -160,8 +255,8 @@ export function createShiftTracker(config = {}) {
   // single-open-at-a-time rule, so both are driven through these two
   // helpers, parameterized by which list ('breaks' or 'waits') they touch.
 
-  function startPeriod(driverId, listKey, alreadyActiveCode, input) {
-    const record = findActive(driverId);
+  async function startPeriod(driverId, listKey, alreadyActiveCode, input) {
+    const record = await repo.findActiveByDriver(driverId);
     if (!record) {
       throw new ShiftError(`Driver "${driverId}" has no active shift`, 'SHIFT_NOT_ACTIVE');
     }
@@ -171,11 +266,12 @@ export function createShiftTracker(config = {}) {
       throw new ShiftError(`A ${label} is already in progress`, alreadyActiveCode);
     }
     list.push({ id: randomUUID(), startedAt: input.at ?? now(), endedAt: null, durationMs: null });
+    await repo.update(record);
     return snapshot(record);
   }
 
-  function endPeriod(driverId, listKey, notActiveCode, input) {
-    const record = findActive(driverId);
+  async function endPeriod(driverId, listKey, notActiveCode, input) {
+    const record = await repo.findActiveByDriver(driverId);
     if (!record) {
       throw new ShiftError(`Driver "${driverId}" has no active shift`, 'SHIFT_NOT_ACTIVE');
     }
@@ -186,6 +282,7 @@ export function createShiftTracker(config = {}) {
     }
     open.endedAt = input.at ?? now();
     open.durationMs = open.endedAt - open.startedAt;
+    await repo.update(record);
     return snapshot(record);
   }
 
@@ -193,7 +290,7 @@ export function createShiftTracker(config = {}) {
    * Start a break during the driver's active shift.
    * @param {string} driverId
    * @param {object} [input] `{ at }` timestamp override.
-   * @returns {object} The updated, frozen shift record.
+   * @returns {Promise<object>} The updated, frozen shift record.
    */
   function startBreak(driverId, input = {}) {
     return startPeriod(driverId, 'breaks', 'SHIFT_BREAK_ALREADY_ACTIVE', input);
@@ -209,7 +306,7 @@ export function createShiftTracker(config = {}) {
    * driver's active shift.
    * @param {string} driverId
    * @param {object} [input] `{ at }` timestamp override.
-   * @returns {object} The updated, frozen shift record.
+   * @returns {Promise<object>} The updated, frozen shift record.
    */
   function startWait(driverId, input = {}) {
     return startPeriod(driverId, 'waits', 'SHIFT_WAIT_ALREADY_ACTIVE', input);
@@ -220,9 +317,8 @@ export function createShiftTracker(config = {}) {
     return endPeriod(driverId, 'waits', 'SHIFT_WAIT_NOT_ACTIVE', input);
   }
 
-  function requireShift(driverId, shiftId) {
-    const shifts = store.get(driverId);
-    const record = shifts && shifts.get(shiftId);
+  async function requireShift(driverId, shiftId) {
+    const record = await repo.findById(driverId, shiftId);
     if (!record) {
       throw new ShiftError(`No shift "${shiftId}" for driver "${driverId}"`, 'SHIFT_NOT_FOUND');
     }
@@ -235,10 +331,10 @@ export function createShiftTracker(config = {}) {
    * miles). The first point of a trip has nothing to accumulate against.
    * @param {string} driverId
    * @param {object} input `{ lat, long, at? }`
-   * @returns {object} The updated, frozen shift record.
+   * @returns {Promise<object>} The updated, frozen shift record.
    */
-  function addGpsPoint(driverId, input = {}) {
-    const record = findActive(driverId);
+  async function addGpsPoint(driverId, input = {}) {
+    const record = await repo.findActiveByDriver(driverId);
     if (!record) {
       throw new ShiftError(`Driver "${driverId}" has no active shift`, 'SHIFT_NOT_ACTIVE');
     }
@@ -251,6 +347,7 @@ export function createShiftTracker(config = {}) {
       );
     }
     gpsPoints.push(point);
+    await repo.update(record);
     return snapshot(record);
   }
 
@@ -261,10 +358,10 @@ export function createShiftTracker(config = {}) {
    * truth over an inferred one.
    * @param {string} driverId
    * @param {object} input `{ startMiles, endMiles }`
-   * @returns {object} The updated, frozen shift record.
+   * @returns {Promise<object>} The updated, frozen shift record.
    */
-  function setOdometer(driverId, input = {}) {
-    const record = findActive(driverId);
+  async function setOdometer(driverId, input = {}) {
+    const record = await repo.findActiveByDriver(driverId);
     if (!record) {
       throw new ShiftError(`Driver "${driverId}" has no active shift`, 'SHIFT_NOT_ACTIVE');
     }
@@ -274,16 +371,17 @@ export function createShiftTracker(config = {}) {
       throw new ShiftError('endMiles cannot be less than startMiles', 'SHIFT_ODOMETER');
     }
     record.trip.odometer = { startMiles, endMiles };
+    await repo.update(record);
     return snapshot(record);
   }
 
   /**
    * The trip distance for a shift: the manual odometer reading when one has
    * been recorded, otherwise the GPS-accumulated distance.
-   * @returns {{ distanceMiles: number, source: 'odometer'|'gps' }}
+   * @returns {Promise<{ distanceMiles: number, source: 'odometer'|'gps' }>}
    */
-  function getTripDistance(driverId, shiftId) {
-    const record = requireShift(driverId, shiftId);
+  async function getTripDistance(driverId, shiftId) {
+    const record = await requireShift(driverId, shiftId);
     if (record.trip.odometer) {
       const { startMiles, endMiles } = record.trip.odometer;
       return { distanceMiles: roundDistance(endMiles - startMiles), source: 'odometer' };
@@ -295,32 +393,30 @@ export function createShiftTracker(config = {}) {
    * Total break and wait time logged against a shift (active or completed).
    * Any still-open period (not yet ended) contributes nothing — end it first
    * to have it counted.
-   * @returns {{ totalBreakMs: number, totalWaitMs: number }}
+   * @returns {Promise<{ totalBreakMs: number, totalWaitMs: number }>}
    */
-  function getDurations(driverId, shiftId) {
-    const record = requireShift(driverId, shiftId);
+  async function getDurations(driverId, shiftId) {
+    const record = await requireShift(driverId, shiftId);
     const sum = (periods) => periods.reduce((total, p) => total + (p.durationMs ?? 0), 0);
     return { totalBreakMs: sum(record.breaks), totalWaitMs: sum(record.waits) };
   }
 
   /** Get a driver's currently active shift, or `null`. */
-  function getActive(driverId) {
-    const record = findActive(driverId);
+  async function getActive(driverId) {
+    const record = await repo.findActiveByDriver(driverId);
     return record ? snapshot(record) : null;
   }
 
   /** Get one shift by id, or `null`. */
-  function get(driverId, shiftId) {
-    const shifts = store.get(driverId);
-    const record = shifts && shifts.get(shiftId);
+  async function get(driverId, shiftId) {
+    const record = await repo.findById(driverId, shiftId);
     return record ? snapshot(record) : null;
   }
 
   /** List a driver's shifts, oldest first. */
-  function list(driverId) {
-    const shifts = store.get(driverId);
-    if (!shifts) return [];
-    return [...shifts.values()].sort((a, b) => a.startedAt - b.startedAt).map(snapshot);
+  async function list(driverId) {
+    const records = await repo.listByDriver(driverId);
+    return records.map(snapshot);
   }
 
   return {
@@ -337,6 +433,6 @@ export function createShiftTracker(config = {}) {
     getActive,
     get,
     list,
-    store,
+    repo,
   };
 }

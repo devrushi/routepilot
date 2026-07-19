@@ -120,7 +120,7 @@ export function createNotificationScheduler(config = {}) {
     const results = [];
 
     if (shiftTracker) {
-      for (const shift of shiftTracker.list(driverId)) {
+      for (const shift of await shiftTracker.list(driverId)) {
         const result = await checkShiftMileage(driverId, shift);
         if (result) results.push(result);
       }

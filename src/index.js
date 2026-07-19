@@ -117,10 +117,17 @@ export {
   BodyError,
 } from './http-utils.js';
 
-export { createShiftTracker, ShiftError } from './shifts.js';
+export {
+  createShiftTracker,
+  createInMemoryShiftRepo,
+  createPostgresShiftRepo,
+  ShiftError,
+} from './shifts.js';
 
 export {
   createFuelLogger,
+  createInMemoryFuelRepo,
+  createPostgresFuelRepo,
   convertCurrency,
   convertVolume,
   DEFAULT_EXCHANGE_RATES,
