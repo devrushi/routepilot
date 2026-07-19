@@ -8,9 +8,14 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test",
-    "test:watch": "node --test --watch"
+    "test": "node --test test/*.test.js",
+    "test:watch": "node --test --watch test/*.test.js",
+    "test:integration": "node --test test/integration/*.test.js",
+    "migrate": "node scripts/migrate.js"
   },
   "license": "UNLICENSED",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "@neondatabase/serverless": "^1.1.0"
+  }
 }

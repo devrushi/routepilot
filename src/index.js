@@ -98,6 +98,20 @@ export {
 
 export { createServer, createRequestHandler, DEFAULT_PORT } from './server.js';
 
+export { createDbClient } from './db.js';
+
+export { createRouter } from './router.js';
+
+export {
+  sendJson,
+  readJsonBody,
+  bearerToken,
+  requireSession,
+  registerErrorStatuses,
+  handleError,
+  BodyError,
+} from './http-utils.js';
+
 export { createShiftTracker, ShiftError } from './shifts.js';
 
 export {
