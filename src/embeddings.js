@@ -1,18 +1,15 @@
-// Vector embeddings of historical driver mileage/earning patterns, with an
-// in-memory vector store and cosine-similarity nearest-neighbor search.
+// Vector embeddings of historical driver mileage/earning patterns, with a
+// cosine-similarity nearest-neighbor search backed by either an in-memory
+// store or Postgres/pgvector.
 //
-// No real embedding model or hosted vector DB is wired up yet:
-// `createMockEmbeddingProvider` implements the same `{ embed(input) }`
-// interface a real provider (OpenAI, Cohere, a local model, ...) would, but
-// derives a small deterministic feature vector directly from the
-// mileage/earnings fields instead of calling out to anything — so indexing
-// and search are fully testable without network access. Swap in a real
-// provider later by passing a different `embeddingProvider` to
-// `createDriverPatternIndex`; the store and search logic don't change.
-//
-// In-memory (a `Map`) rather than file-backed, matching every other
-// module's store convention in this repo — swap for a persistent backend
-// the same way the other trackers would (inject a different `store`).
+// No real embedding model is wired up yet: `createMockEmbeddingProvider`
+// implements the same `{ embed(input) }` interface a real provider (OpenAI,
+// Cohere, a local model, ...) would, but derives a small deterministic
+// feature vector directly from the mileage/earnings fields instead of
+// calling out to anything — so indexing and search are fully testable
+// without network access. Swap in a real provider later by passing a
+// different `embeddingProvider` to `createDriverPatternIndex`; the store
+// and search logic don't change.
 
 import { randomUUID } from 'node:crypto';
 
@@ -69,44 +66,158 @@ export function cosineSimilarity(a, b) {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
+function cloneRecord(record) {
+  return { id: record.id, vector: [...record.vector], metadata: { ...record.metadata } };
+}
+
 /**
- * Create an in-memory vector store with cosine-similarity search.
+ * In-memory (a `Map`) vector repo — the default. `search`'s `driverId`
+ * option scopes candidates to `metadata.driverId === driverId`, mirroring
+ * how the Postgres repo pushes the same scoping down to a real column.
+ */
+export function createInMemoryVectorRepo() {
+  const store = new Map();
+  return {
+    async upsert(id, vector, metadata) {
+      const record = { id, vector: [...vector], metadata: { ...metadata } };
+      store.set(id, record);
+      return cloneRecord(record);
+    },
+    async remove(id) {
+      return store.delete(id);
+    },
+    async get(id) {
+      const record = store.get(id);
+      return record ? cloneRecord(record) : null;
+    },
+    async search(queryVector, options = {}) {
+      const { topK = 5, driverId } = options;
+      const scored = [];
+      for (const record of store.values()) {
+        if (record.vector.length !== queryVector.length) continue;
+        if (driverId && record.metadata.driverId !== driverId) continue;
+        scored.push({ ...cloneRecord(record), score: cosineSimilarity(queryVector, record.vector) });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      return scored.slice(0, topK);
+    },
+    async size() {
+      return store.size;
+    },
+  };
+}
+
+function parseJsonColumn(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+// Postgres's pgvector output format (e.g. "[1,2,3]") is valid JSON, so the
+// same JSON.parse-if-string handling as parseJsonColumn works here too.
+function parseVectorColumn(value) {
+  return typeof value === 'string' ? JSON.parse(value) : [...value];
+}
+
+function toVectorLiteral(vector) {
+  return `[${vector.join(',')}]`;
+}
+
+/**
+ * Postgres/pgvector-backed vector repo. Expects a `vector_patterns` table
+ * (see db/migrations, `CREATE EXTENSION vector`) with a fixed-width
+ * `embedding vector(4)` column matching the mock provider's 4-dim output —
+ * widening it is a migration, documented as a known follow-up for whenever
+ * a real embedding model replaces the mock. `driver_id` is stored as its
+ * own column (not just inside `metadata` JSONB) so `search`'s `driverId`
+ * scoping can be pushed into the `WHERE` clause alongside pgvector's `<=>`
+ * (cosine distance) operator for the `ORDER BY`.
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresVectorRepo(sql) {
+  function fromRow(row) {
+    return {
+      id: row.id,
+      vector: parseVectorColumn(row.embedding),
+      metadata: parseJsonColumn(row.metadata, {}),
+    };
+  }
+
+  return {
+    async upsert(id, vector, metadata) {
+      const driverId = metadata?.driverId ?? null;
+      const vectorLiteral = toVectorLiteral(vector);
+      await sql`
+        INSERT INTO vector_patterns (id, driver_id, embedding, metadata)
+        VALUES (${id}, ${driverId}, ${vectorLiteral}::vector, ${JSON.stringify(metadata)}::jsonb)
+        ON CONFLICT (id) DO UPDATE SET driver_id = EXCLUDED.driver_id, embedding = EXCLUDED.embedding, metadata = EXCLUDED.metadata
+      `;
+      return { id, vector: [...vector], metadata: { ...metadata } };
+    },
+    async remove(id) {
+      const rows = await sql`DELETE FROM vector_patterns WHERE id = ${id} RETURNING id`;
+      return rows.length > 0;
+    },
+    async get(id) {
+      const [row] = await sql`SELECT id, embedding, metadata FROM vector_patterns WHERE id = ${id}`;
+      return row ? fromRow(row) : null;
+    },
+    async search(queryVector, options = {}) {
+      const { topK = 5, driverId } = options;
+      const vectorLiteral = toVectorLiteral(queryVector);
+      const rows = driverId
+        ? await sql`
+            SELECT id, embedding, metadata, 1 - (embedding <=> ${vectorLiteral}::vector) AS score
+            FROM vector_patterns
+            WHERE driver_id = ${driverId}
+            ORDER BY embedding <=> ${vectorLiteral}::vector
+            LIMIT ${topK}
+          `
+        : await sql`
+            SELECT id, embedding, metadata, 1 - (embedding <=> ${vectorLiteral}::vector) AS score
+            FROM vector_patterns
+            ORDER BY embedding <=> ${vectorLiteral}::vector
+            LIMIT ${topK}
+          `;
+      return rows.map((row) => ({ ...fromRow(row), score: Number(row.score) }));
+    },
+    async size() {
+      const [row] = await sql`SELECT COUNT(*)::int AS count FROM vector_patterns`;
+      return row.count;
+    },
+  };
+}
+
+/**
+ * Create a vector store with cosine-similarity search.
  * @param {object} [config]
- * @param {Map} [config.store] Backing store, keyed by vector id (defaults in-memory).
+ * @param {{upsert:Function, remove:Function, get:Function, search:Function, size:Function}} [config.repo] Vector repo (defaults to an in-memory one).
  */
 export function createVectorStore(config = {}) {
-  const { store = new Map() } = config;
-
-  function cloneRecord(record) {
-    return { id: record.id, vector: [...record.vector], metadata: { ...record.metadata } };
-  }
+  const { repo = createInMemoryVectorRepo() } = config;
 
   /**
    * Insert or replace a vector.
    * @param {string} id
    * @param {number[]} vector
    * @param {object} [metadata] Arbitrary data returned alongside search hits.
-   * @returns {object} The stored record.
+   * @returns {Promise<object>} The stored record.
    */
-  function upsert(id, vector, metadata = {}) {
+  async function upsert(id, vector, metadata = {}) {
     if (!id) {
       throw new EmbeddingError('An id is required', 'EMBEDDING_ID');
     }
     validateVector(vector);
-    const record = { id, vector: [...vector], metadata: { ...metadata } };
-    store.set(id, record);
-    return cloneRecord(record);
+    return repo.upsert(id, vector, { ...metadata });
   }
 
-  /** Remove a vector. @returns {boolean} Whether one was removed. */
-  function remove(id) {
-    return store.delete(id);
+  /** Remove a vector. @returns {Promise<boolean>} Whether one was removed. */
+  async function remove(id) {
+    return repo.remove(id);
   }
 
   /** Get one vector record, or `null`. */
-  function get(id) {
-    const record = store.get(id);
-    return record ? cloneRecord(record) : null;
+  async function get(id) {
+    return repo.get(id);
   }
 
   /**
@@ -114,23 +225,20 @@ export function createVectorStore(config = {}) {
    * @param {number[]} queryVector
    * @param {object} [options]
    * @param {number} [options.topK=5]
-   * @param {(metadata:object) => boolean} [options.filter] Restrict the candidate set before ranking.
-   * @returns {Array<{id:string, score:number, vector:number[], metadata:object}>}
+   * @param {string} [options.driverId] Restrict the candidate set to one driver's vectors.
+   * @returns {Promise<Array<{id:string, score:number, vector:number[], metadata:object}>>}
    */
-  function search(queryVector, options = {}) {
+  async function search(queryVector, options = {}) {
     validateVector(queryVector);
-    const { topK = 5, filter } = options;
-    const scored = [];
-    for (const record of store.values()) {
-      if (record.vector.length !== queryVector.length) continue;
-      if (filter && !filter(record.metadata)) continue;
-      scored.push({ ...cloneRecord(record), score: cosineSimilarity(queryVector, record.vector) });
-    }
-    scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, topK);
+    return repo.search(queryVector, options);
   }
 
-  return { upsert, remove, get, search, size: () => store.size, store };
+  /** Number of stored vectors. */
+  async function size() {
+    return repo.size();
+  }
+
+  return { upsert, remove, get, search, size, repo };
 }
 
 /**
@@ -171,7 +279,7 @@ export function createDriverPatternIndex(config = {}) {
    */
   async function findSimilarPatterns(driverId, queryPattern = {}, options = {}) {
     const vector = await embeddingProvider.embed(queryPattern);
-    return vectorStore.search(vector, { ...options, filter: (metadata) => metadata.driverId === driverId });
+    return vectorStore.search(vector, { ...options, driverId });
   }
 
   return { indexPattern, findSimilarPatterns, vectorStore, embeddingProvider };

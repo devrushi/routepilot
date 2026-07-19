@@ -7,40 +7,40 @@ import {
   cosineSimilarity,
 } from '../src/embeddings.js';
 
-test('upsert stores a vector and get retrieves it', () => {
+test('upsert stores a vector and get retrieves it', async () => {
   const store = createVectorStore();
-  store.upsert('a', [1, 0, 0], { label: 'first' });
-  const record = store.get('a');
+  await store.upsert('a', [1, 0, 0], { label: 'first' });
+  const record = await store.get('a');
   assert.deepEqual(record.vector, [1, 0, 0]);
   assert.equal(record.metadata.label, 'first');
-  assert.equal(store.size(), 1);
+  assert.equal(await store.size(), 1);
 });
 
-test('upsert rejects a missing id or an invalid vector', () => {
+test('upsert rejects a missing id or an invalid vector', async () => {
   const store = createVectorStore();
-  assert.throws(() => store.upsert('', [1, 2]), (e) => e.code === 'EMBEDDING_ID');
-  assert.throws(() => store.upsert('a', []), (e) => e.code === 'EMBEDDING_VECTOR');
-  assert.throws(() => store.upsert('a', [1, 'x']), (e) => e.code === 'EMBEDDING_VECTOR');
+  await assert.rejects(() => store.upsert('', [1, 2]), (e) => e.code === 'EMBEDDING_ID');
+  await assert.rejects(() => store.upsert('a', []), (e) => e.code === 'EMBEDDING_VECTOR');
+  await assert.rejects(() => store.upsert('a', [1, 'x']), (e) => e.code === 'EMBEDDING_VECTOR');
 });
 
-test('search returns the nearest matches for a query vector, closest first', () => {
+test('search returns the nearest matches for a query vector, closest first', async () => {
   const store = createVectorStore();
-  store.upsert('close', [1, 0]);
-  store.upsert('far', [0, 1]);
-  store.upsert('opposite', [-1, 0]);
+  await store.upsert('close', [1, 0]);
+  await store.upsert('far', [0, 1]);
+  await store.upsert('opposite', [-1, 0]);
 
-  const results = store.search([1, 0], { topK: 2 });
+  const results = await store.search([1, 0], { topK: 2 });
   assert.equal(results.length, 2);
   assert.equal(results[0].id, 'close');
   assert.ok(results[0].score > results[1].score);
 });
 
-test('search respects a metadata filter', () => {
+test('search respects a driverId filter', async () => {
   const store = createVectorStore();
-  store.upsert('a', [1, 0], { driverId: 'drv_1' });
-  store.upsert('b', [1, 0], { driverId: 'drv_2' });
+  await store.upsert('a', [1, 0], { driverId: 'drv_1' });
+  await store.upsert('b', [1, 0], { driverId: 'drv_2' });
 
-  const results = store.search([1, 0], { filter: (m) => m.driverId === 'drv_1' });
+  const results = await store.search([1, 0], { driverId: 'drv_1' });
   assert.equal(results.length, 1);
   assert.equal(results[0].id, 'a');
 });

@@ -183,6 +183,8 @@ export {
 
 export {
   createVectorStore,
+  createInMemoryVectorRepo,
+  createPostgresVectorRepo,
   createDriverPatternIndex,
   createMockEmbeddingProvider,
   cosineSimilarity,
