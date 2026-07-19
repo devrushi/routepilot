@@ -44,7 +44,7 @@ test('reconcileRoute returns pending when the DSP hasn\'t reported earnings yet'
 
 async function setupDriverWithRoutes(portalRoutes) {
   const connections = createDspConnectionManager();
-  const link = connections.link('drv_1', {
+  const link = await connections.link('drv_1', {
     partner: 'doordash',
     externalAccountId: 'acct_1',
     payoutRate: RAW_PER_MILE_RATE,
@@ -64,12 +64,12 @@ test('createPayoutReconciliationWidget reports a matched status for a driver who
   ]);
   const widget = createPayoutReconciliationWidget({ connections, routeSync });
 
-  const linkResult = widget.reconcileLink('drv_1', linkId);
+  const linkResult = await widget.reconcileLink('drv_1', linkId);
   assert.equal(linkResult.status, 'matched');
   assert.equal(linkResult.mismatchCount, 0);
   assert.equal(linkResult.evaluatedRoutes, 2);
 
-  const driverResults = widget.reconcileDriver('drv_1');
+  const driverResults = await widget.reconcileDriver('drv_1');
   assert.equal(driverResults.length, 1);
   assert.equal(driverResults[0].status, 'matched');
 });
@@ -81,7 +81,7 @@ test('createPayoutReconciliationWidget flags a driver with a mismatched DSP payo
   ]);
   const widget = createPayoutReconciliationWidget({ connections, routeSync });
 
-  const linkResult = widget.reconcileLink('drv_1', linkId);
+  const linkResult = await widget.reconcileLink('drv_1', linkId);
   assert.equal(linkResult.status, 'mismatch');
   assert.equal(linkResult.mismatchCount, 1);
   const mismatch = linkResult.reconciliations.find((r) => r.routeId === 'route2');

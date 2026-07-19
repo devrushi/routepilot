@@ -23,14 +23,14 @@ function rateCard(overrides = {}) {
 
 // Build a DSP connection manager with a couple of active links for one driver.
 let idCounter = 0;
-function dspManager() {
+async function dspManager() {
   idCounter = 0;
   const dsp = createDspConnectionManager({
     now,
     generateId: () => `dsp_${(idCounter += 1)}`,
   });
-  dsp.link('drv_1', { partner: 'doordash', externalAccountId: 'dd-1', payoutRate: rateCard() });
-  dsp.link('drv_1', { partner: 'amazon_flex', externalAccountId: 'af-1', payoutRate: rateCard() });
+  await dsp.link('drv_1', { partner: 'doordash', externalAccountId: 'dd-1', payoutRate: rateCard() });
+  await dsp.link('drv_1', { partner: 'amazon_flex', externalAccountId: 'af-1', payoutRate: rateCard() });
   return dsp;
 }
 
@@ -127,7 +127,7 @@ test('createRouteHistorySyncWorker validates its config', () => {
 // --- syncLink ------------------------------------------------------------
 
 test('syncLink fetches, normalizes, upserts and advances the cursor', async () => {
-  const dsp = dspManager();
+  const dsp = await dspManager();
   let seenSince;
   const worker = createRouteHistorySyncWorker({
     connections: dsp,
@@ -137,7 +137,7 @@ test('syncLink fetches, normalizes, upserts and advances the cursor', async () =
       return partner === 'doordash' ? [ddRoute('r1'), ddRoute('r2')] : [];
     },
   });
-  const [ddLink] = dsp.listActive('drv_1');
+  const [ddLink] = await dsp.listActive('drv_1');
 
   const summary = await worker.syncLink('drv_1', ddLink);
   assert.equal(seenSince, null); // first run has no cursor
@@ -147,14 +147,14 @@ test('syncLink fetches, normalizes, upserts and advances the cursor', async () =
   assert.equal(summary.cursor, Date.UTC(2024, 5, 30, 10, 30, 0));
   assert.ok(Object.isFrozen(summary));
 
-  const routes = worker.listRoutes('drv_1', ddLink.id);
+  const routes = await worker.listRoutes('drv_1', ddLink.id);
   assert.equal(routes.length, 2);
   assert.ok(Object.isFrozen(routes[0]));
 });
 
 test('syncLink is incremental and deduplicates by route id', async () => {
-  const dsp = dspManager();
-  const [ddLink] = dsp.listActive('drv_1');
+  const dsp = await dspManager();
+  const [ddLink] = await dsp.listActive('drv_1');
   let call = 0;
   const sinceByCall = [];
   const worker = createRouteHistorySyncWorker({
@@ -182,13 +182,14 @@ test('syncLink is incremental and deduplicates by route id', async () => {
   assert.equal(second.total, 3); // no duplicate
   assert.equal(second.cursor, Date.UTC(2024, 5, 30, 12, 0, 0));
 
-  const r2 = worker.listRoutes('drv_1', ddLink.id).find((r) => r.id === 'r2');
+  const routes = await worker.listRoutes('drv_1', ddLink.id);
+  const r2 = routes.find((r) => r.id === 'r2');
   assert.equal(r2.earnings, 50); // upserted with the newer payload
 });
 
 test('syncLink skips malformed records without aborting the sweep', async () => {
-  const dsp = dspManager();
-  const [ddLink] = dsp.listActive('drv_1');
+  const dsp = await dspManager();
+  const [ddLink] = await dsp.listActive('drv_1');
   const worker = createRouteHistorySyncWorker({
     connections: dsp,
     now,
@@ -202,8 +203,8 @@ test('syncLink skips malformed records without aborting the sweep', async () => 
 });
 
 test('syncLink full-refetch ignores the stored cursor', async () => {
-  const dsp = dspManager();
-  const [ddLink] = dsp.listActive('drv_1');
+  const dsp = await dspManager();
+  const [ddLink] = await dsp.listActive('drv_1');
   const sinceByCall = [];
   const worker = createRouteHistorySyncWorker({
     connections: dsp,
@@ -217,8 +218,8 @@ test('syncLink full-refetch ignores the stored cursor', async () => {
 });
 
 test('syncLink surfaces a portal failure as ROUTE_SYNC_PORTAL and records it', async () => {
-  const dsp = dspManager();
-  const [ddLink] = dsp.listActive('drv_1');
+  const dsp = await dspManager();
+  const [ddLink] = await dsp.listActive('drv_1');
   const worker = createRouteHistorySyncWorker({
     connections: dsp,
     now,
@@ -228,12 +229,12 @@ test('syncLink surfaces a portal failure as ROUTE_SYNC_PORTAL and records it', a
     () => worker.syncLink('drv_1', ddLink),
     (e) => e.code === 'ROUTE_SYNC_PORTAL' && /portal 503/.test(e.message),
   );
-  assert.equal(worker.getSyncState('drv_1', ddLink.id).lastError, 'portal 503');
+  assert.equal((await worker.getSyncState('drv_1', ddLink.id)).lastError, 'portal 503');
 });
 
 test('syncLink rejects a non-array portal response', async () => {
-  const dsp = dspManager();
-  const [ddLink] = dsp.listActive('drv_1');
+  const dsp = await dspManager();
+  const [ddLink] = await dsp.listActive('drv_1');
   const worker = createRouteHistorySyncWorker({
     connections: dsp, now, portal: async () => ({ not: 'an array' }),
   });
@@ -241,8 +242,8 @@ test('syncLink rejects a non-array portal response', async () => {
 });
 
 test('syncLink treats a null/empty portal response as no routes', async () => {
-  const dsp = dspManager();
-  const [ddLink] = dsp.listActive('drv_1');
+  const dsp = await dspManager();
+  const [ddLink] = await dsp.listActive('drv_1');
   const worker = createRouteHistorySyncWorker({ connections: dsp, now, portal: async () => null });
   const summary = await worker.syncLink('drv_1', ddLink);
   assert.equal(summary.fetched, 0);
@@ -252,8 +253,8 @@ test('syncLink treats a null/empty portal response as no routes', async () => {
 // --- runOnce (background sweep) ------------------------------------------
 
 test('runOnce sweeps every active link of every driver', async () => {
-  const dsp = dspManager();
-  dsp.link('drv_2', { partner: 'uber_eats', externalAccountId: 'ue-1', payoutRate: rateCard() });
+  const dsp = await dspManager();
+  await dsp.link('drv_2', { partner: 'uber_eats', externalAccountId: 'ue-1', payoutRate: rateCard() });
   const worker = createRouteHistorySyncWorker({
     connections: dsp,
     now,
@@ -271,7 +272,7 @@ test('runOnce sweeps every active link of every driver', async () => {
 });
 
 test('runOnce isolates a failing link and keeps sweeping the rest', async () => {
-  const dsp = dspManager();
+  const dsp = await dspManager();
   const worker = createRouteHistorySyncWorker({
     connections: dsp,
     now,
@@ -290,8 +291,8 @@ test('runOnce isolates a failing link and keeps sweeping the rest', async () => 
 });
 
 test('runOnce can target a single driver', async () => {
-  const dsp = dspManager();
-  dsp.link('drv_2', { partner: 'uber_eats', externalAccountId: 'ue-1', payoutRate: rateCard() });
+  const dsp = await dspManager();
+  await dsp.link('drv_2', { partner: 'uber_eats', externalAccountId: 'ue-1', payoutRate: rateCard() });
   const worker = createRouteHistorySyncWorker({
     connections: dsp, now, portal: async () => [ddRoute('r1')],
   });
@@ -303,7 +304,7 @@ test('runOnce can target a single driver', async () => {
 // --- start / stop (interval scheduling with an injected timer) -----------
 
 test('start runs immediately and on each interval; stop deschedules', async () => {
-  const dsp = dspManager();
+  const dsp = await dspManager();
   let runs = 0;
   const reports = [];
   let scheduled = null;
@@ -331,7 +332,7 @@ test('start runs immediately and on each interval; stop deschedules', async () =
 });
 
 test('start rejects a double-start and a non-positive interval', async () => {
-  const dsp = dspManager();
+  const dsp = await dspManager();
   const worker = createRouteHistorySyncWorker({
     connections: dsp, now, portal: async () => [], setInterval: () => 'h', clearInterval: () => {},
   });
@@ -342,7 +343,7 @@ test('start rejects a double-start and a non-positive interval', async () => {
 });
 
 test('start forwards a scheduled-sweep failure to onError', async () => {
-  const dsp = dspManager();
+  const dsp = await dspManager();
   const errors = [];
   let scheduled = null;
   const worker = createRouteHistorySyncWorker({
@@ -367,8 +368,8 @@ test('start forwards a scheduled-sweep failure to onError', async () => {
 // --- listRoutes / getSyncState -------------------------------------------
 
 test('listRoutes returns newest-first and filters by status', async () => {
-  const dsp = dspManager();
-  const [ddLink] = dsp.listActive('drv_1');
+  const dsp = await dspManager();
+  const [ddLink] = await dsp.listActive('drv_1');
   const worker = createRouteHistorySyncWorker({
     connections: dsp,
     now,
@@ -380,31 +381,31 @@ test('listRoutes returns newest-first and filters by status', async () => {
   });
   await worker.syncLink('drv_1', ddLink);
 
-  const routes = worker.listRoutes('drv_1', ddLink.id);
+  const routes = await worker.listRoutes('drv_1', ddLink.id);
   assert.deepEqual(routes.map((r) => r.id), ['new', 'cx', 'old']);
 
-  const cancelled = worker.listRoutes('drv_1', ddLink.id, { status: 'cancelled' });
+  const cancelled = await worker.listRoutes('drv_1', ddLink.id, { status: 'cancelled' });
   assert.deepEqual(cancelled.map((r) => r.id), ['cx']);
 
-  assert.throws(() => worker.listRoutes('drv_1', ddLink.id, { status: 'bogus' }), (e) => e.code === 'ROUTE_SYNC_STATUS');
-  assert.deepEqual(worker.listRoutes('drv_1', 'missing'), []);
+  await assert.rejects(() => worker.listRoutes('drv_1', ddLink.id, { status: 'bogus' }), (e) => e.code === 'ROUTE_SYNC_STATUS');
+  assert.deepEqual(await worker.listRoutes('drv_1', 'missing'), []);
 });
 
 test('getSyncState reports the cursor, last run and route count', async () => {
-  const dsp = dspManager();
-  const [ddLink] = dsp.listActive('drv_1');
+  const dsp = await dspManager();
+  const [ddLink] = await dsp.listActive('drv_1');
   const worker = createRouteHistorySyncWorker({
     connections: dsp, now, portal: async () => [ddRoute('r1')],
   });
   await worker.syncLink('drv_1', ddLink);
-  const state = worker.getSyncState('drv_1', ddLink.id);
+  const state = await worker.getSyncState('drv_1', ddLink.id);
   assert.equal(state.routeCount, 1);
   assert.equal(state.lastRunAt, FIXED_NOW);
   assert.equal(state.cursor, Date.UTC(2024, 5, 30, 10, 30, 0));
   assert.equal(state.lastError, null);
   assert.ok(Object.isFrozen(state));
 
-  assert.throws(() => worker.getSyncState('drv_1', 'missing'), (e) => e.code === 'ROUTE_SYNC_NOT_FOUND');
+  await assert.rejects(() => worker.getSyncState('drv_1', 'missing'), (e) => e.code === 'ROUTE_SYNC_NOT_FOUND');
 });
 
 // --- catalogue -----------------------------------------------------------

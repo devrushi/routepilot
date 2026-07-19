@@ -309,6 +309,144 @@ export function validateVehicle(input = {}, opts = {}) {
   };
 }
 
+/** In-memory vehicle repo (default) — nested Map-backed, async interface. */
+export function createInMemoryVehicleRepo() {
+  const byDriver = new Map(); // driverId -> Map(id -> record)
+
+  function driverVehicles(driverId) {
+    let fleet = byDriver.get(driverId);
+    if (!fleet) {
+      fleet = new Map();
+      byDriver.set(driverId, fleet);
+    }
+    return fleet;
+  }
+
+  return {
+    async insert(record) {
+      driverVehicles(record.driverId).set(record.id, structuredClone(record));
+    },
+    async findById(driverId, id) {
+      const fleet = byDriver.get(driverId);
+      const record = fleet && fleet.get(id);
+      return record ? structuredClone(record) : null;
+    },
+    async update(record) {
+      driverVehicles(record.driverId).set(record.id, structuredClone(record));
+    },
+    async listByDriver(driverId, filter = {}) {
+      const fleet = byDriver.get(driverId);
+      if (!fleet) return [];
+      let records = [...fleet.values()].sort((a, b) => a.addedAt - b.addedAt || a.seq - b.seq);
+      if (filter.status !== undefined) records = records.filter((v) => v.status === filter.status);
+      if (filter.fuelCategory !== undefined) records = records.filter((v) => v.fuel.category === filter.fuelCategory);
+      return records.map((r) => structuredClone(r));
+    },
+    async remove(driverId, id) {
+      const fleet = byDriver.get(driverId);
+      if (!fleet || !fleet.has(id)) return false;
+      fleet.delete(id);
+      return true;
+    },
+  };
+}
+
+function parseJsonColumn(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+/**
+ * Postgres-backed vehicle repo. Expects a `vehicles` table (see
+ * db/migrations); `plate`/`fuel`/`battery` are JSONB (nested objects,
+ * always read/written whole). The DB column is `primary_flag` (`primary`
+ * being an awkward name to quote everywhere), mapped to `primary` in JS.
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresVehicleRepo(sql) {
+  function fromRow(row) {
+    return {
+      id: row.id,
+      driverId: row.driver_id,
+      vin: row.vin,
+      make: row.make,
+      model: row.model,
+      year: row.year,
+      nickname: row.nickname,
+      displayName: row.display_name,
+      plate: parseJsonColumn(row.plate, null),
+      fuel: parseJsonColumn(row.fuel, null),
+      battery: parseJsonColumn(row.battery, null),
+      status: row.status,
+      primary: row.primary_flag,
+      addedAt: Number(row.added_at),
+      updatedAt: Number(row.updated_at),
+      seq: Number(row.seq),
+    };
+  }
+
+  return {
+    async insert(record) {
+      await sql`
+        INSERT INTO vehicles (
+          id, driver_id, vin, make, model, year, nickname, display_name, plate, fuel, battery,
+          status, primary_flag, added_at, updated_at, seq
+        )
+        VALUES (
+          ${record.id}, ${record.driverId}, ${record.vin}, ${record.make}, ${record.model}, ${record.year},
+          ${record.nickname}, ${record.displayName}, ${record.plate ? JSON.stringify(record.plate) : null}::jsonb,
+          ${JSON.stringify(record.fuel)}::jsonb, ${record.battery ? JSON.stringify(record.battery) : null}::jsonb,
+          ${record.status}, ${record.primary}, ${record.addedAt}, ${record.updatedAt}, ${record.seq}
+        )
+      `;
+    },
+    async findById(driverId, id) {
+      const rows = await sql`SELECT * FROM vehicles WHERE driver_id = ${driverId} AND id = ${id} LIMIT 1`;
+      return rows[0] ? fromRow(rows[0]) : null;
+    },
+    async update(record) {
+      await sql`
+        UPDATE vehicles SET
+          vin = ${record.vin}, make = ${record.make}, model = ${record.model}, year = ${record.year},
+          nickname = ${record.nickname}, display_name = ${record.displayName},
+          plate = ${record.plate ? JSON.stringify(record.plate) : null}::jsonb,
+          fuel = ${JSON.stringify(record.fuel)}::jsonb,
+          battery = ${record.battery ? JSON.stringify(record.battery) : null}::jsonb,
+          status = ${record.status}, primary_flag = ${record.primary}, updated_at = ${record.updatedAt}
+        WHERE id = ${record.id}
+      `;
+    },
+    async listByDriver(driverId, filter = {}) {
+      if (filter.status !== undefined && filter.fuelCategory !== undefined) {
+        const rows = await sql`
+          SELECT * FROM vehicles
+          WHERE driver_id = ${driverId} AND status = ${filter.status} AND fuel->>'category' = ${filter.fuelCategory}
+          ORDER BY added_at ASC, seq ASC
+        `;
+        return rows.map(fromRow);
+      }
+      if (filter.status !== undefined) {
+        const rows = await sql`
+          SELECT * FROM vehicles WHERE driver_id = ${driverId} AND status = ${filter.status} ORDER BY added_at ASC, seq ASC
+        `;
+        return rows.map(fromRow);
+      }
+      if (filter.fuelCategory !== undefined) {
+        const rows = await sql`
+          SELECT * FROM vehicles WHERE driver_id = ${driverId} AND fuel->>'category' = ${filter.fuelCategory} ORDER BY added_at ASC, seq ASC
+        `;
+        return rows.map(fromRow);
+      }
+      const rows = await sql`SELECT * FROM vehicles WHERE driver_id = ${driverId} ORDER BY added_at ASC, seq ASC`;
+      return rows.map(fromRow);
+    },
+    async remove(driverId, id) {
+      const rows = await sql`DELETE FROM vehicles WHERE driver_id = ${driverId} AND id = ${id} RETURNING id`;
+      return rows.length > 0;
+    },
+  };
+}
+
 /**
  * Create a vehicle registry that manages a driver's fleet. A driver may keep
  * **multiple active vehicles**; exactly one of the active vehicles is flagged
@@ -316,7 +454,7 @@ export function validateVehicle(input = {}, opts = {}) {
  * deactivated, retired or removed).
  *
  * @param {object} [config]
- * @param {Map} [config.store] Per-driver vehicle store (defaults in-memory).
+ * @param {{insert:Function, findById:Function, update:Function, listByDriver:Function, remove:Function}} [config.repo] Vehicle repo (defaults to an in-memory one).
  * @param {Array} [config.fuelTypes] Fuel/EV catalogue.
  * @param {Array} [config.connectorTypes] Connector catalogue.
  * @param {number} [config.minYear] Oldest accepted model year.
@@ -326,7 +464,7 @@ export function validateVehicle(input = {}, opts = {}) {
  */
 export function createVehicleRegistry(config = {}) {
   const {
-    store = new Map(),
+    repo = createInMemoryVehicleRepo(),
     fuelTypes = FUEL_TYPES,
     connectorTypes = EV_CONNECTOR_TYPES,
     minYear = 1900,
@@ -344,47 +482,49 @@ export function createVehicleRegistry(config = {}) {
 
   const validateOpts = { fuelTypes, connectorTypes, minYear, now };
   if (maxYear !== undefined) validateOpts.maxYear = maxYear;
+  // Tie-breaker for vehicles added within the same millisecond — owned by
+  // the tracker (not the repo/DB), same reasoning as dsp.js's seqCounter.
+  let seqCounter = 0;
 
-  function requireDriver(driverId) {
-    if (!driverId) {
-      throw new VehicleError('A driverId is required', 'VEHICLE_DRIVER');
-    }
-    let fleet = store.get(driverId);
-    if (!fleet) {
-      fleet = new Map();
-      store.set(driverId, fleet);
-    }
-    return fleet;
-  }
-
-  function requireVehicle(driverId, vehicleId) {
-    const fleet = store.get(driverId);
-    const record = fleet && fleet.get(vehicleId);
+  async function requireVehicle(driverId, vehicleId) {
+    const record = await repo.findById(driverId, vehicleId);
     if (!record) {
       throw new VehicleError(`No vehicle "${vehicleId}" for driver "${driverId}"`, 'VEHICLE_NOT_FOUND');
     }
     return record;
   }
 
-  // Ordered snapshot of a fleet (oldest-added first), for stable listings and
-  // deterministic primary re-assignment.
-  function ordered(fleet) {
-    return [...fleet.values()].sort((a, b) => a.addedAt - b.addedAt || (a.seq - b.seq));
-  }
-
   // Ensure exactly one active vehicle is primary. If the current primary is no
-  // longer active (or gone), promote the earliest-added active vehicle.
-  function reconcilePrimary(fleet) {
-    const active = ordered(fleet).filter((v) => v.status === 'active');
+  // longer active (or gone), promote the earliest-added active vehicle. Only
+  // issues repo.update() for records whose primary flag actually changes.
+  async function reconcilePrimary(driverId) {
+    const fleet = await repo.listByDriver(driverId);
+    const active = fleet.filter((v) => v.status === 'active');
     const current = active.find((v) => v.primary);
-    for (const v of fleet.values()) {
-      if (v.status !== 'active' && v.primary) v.primary = false;
+
+    for (const v of fleet) {
+      if (v.status !== 'active' && v.primary) {
+        v.primary = false;
+        await repo.update(v);
+      }
     }
     if (active.length === 0) return;
     if (current) {
-      for (const v of active) v.primary = v === current;
+      for (const v of active) {
+        const shouldBePrimary = v.id === current.id;
+        if (v.primary !== shouldBePrimary) {
+          v.primary = shouldBePrimary;
+          await repo.update(v);
+        }
+      }
     } else {
-      active.forEach((v, i) => { v.primary = i === 0; });
+      for (let i = 0; i < active.length; i += 1) {
+        const shouldBePrimary = i === 0;
+        if (active[i].primary !== shouldBePrimary) {
+          active[i].primary = shouldBePrimary;
+          await repo.update(active[i]);
+        }
+      }
     }
   }
 
@@ -401,13 +541,16 @@ export function createVehicleRegistry(config = {}) {
    * @param {boolean} [options.primary] Make this the driver's primary vehicle.
    * @param {string} [options.status='active'] Initial lifecycle status.
    * @param {string} [options.id] Explicit vehicle id (defaults to a generated one).
-   * @returns {object} The stored, frozen vehicle record.
+   * @returns {Promise<object>} The stored, frozen vehicle record.
    */
-  function add(driverId, input, options = {}) {
-    const fleet = requireDriver(driverId);
+  async function add(driverId, input, options = {}) {
+    if (!driverId) {
+      throw new VehicleError('A driverId is required', 'VEHICLE_DRIVER');
+    }
     const core = validateVehicle(input, validateOpts);
 
-    for (const existing of fleet.values()) {
+    const existingFleet = await repo.listByDriver(driverId);
+    for (const existing of existingFleet) {
       if (existing.vin === core.vin && existing.status !== 'retired') {
         throw new VehicleError(
           `Vehicle with VIN ${core.vin} is already registered for this driver`,
@@ -421,7 +564,7 @@ export function createVehicleRegistry(config = {}) {
       throw new VehicleError(`Unknown vehicle status: ${status}`, 'VEHICLE_STATUS');
     }
     const id = options.id ?? generateId();
-    if (fleet.has(id)) {
+    if (await repo.findById(driverId, id)) {
       throw new VehicleError(`Vehicle id "${id}" already exists for this driver`, 'VEHICLE_DUPLICATE');
     }
 
@@ -434,21 +577,27 @@ export function createVehicleRegistry(config = {}) {
       primary: false,
       addedAt: timestamp,
       updatedAt: timestamp,
-      seq: fleet.size,
+      seq: seqCounter++,
     };
-    fleet.set(id, record);
+    await repo.insert(record);
 
     if (options.primary === true && status === 'active') {
-      for (const v of fleet.values()) v.primary = false;
+      for (const v of existingFleet) {
+        if (v.primary) {
+          v.primary = false;
+          await repo.update(v);
+        }
+      }
       record.primary = true;
+      await repo.update(record);
     }
-    reconcilePrimary(fleet);
-    return snapshot(record);
+    await reconcilePrimary(driverId);
+    return snapshot(await repo.findById(driverId, id));
   }
 
   /** Get one vehicle (frozen) or throw `VEHICLE_NOT_FOUND`. */
-  function get(driverId, vehicleId) {
-    return snapshot(requireVehicle(driverId, vehicleId));
+  async function get(driverId, vehicleId) {
+    return snapshot(await requireVehicle(driverId, vehicleId));
   }
 
   /**
@@ -457,21 +606,13 @@ export function createVehicleRegistry(config = {}) {
    * @param {object} [filter]
    * @param {string} [filter.status] Only vehicles in this lifecycle status.
    * @param {string} [filter.fuelCategory] Only vehicles in this fuel category.
-   * @returns {object[]} Frozen vehicle records.
+   * @returns {Promise<object[]>} Frozen vehicle records.
    */
-  function list(driverId, filter = {}) {
-    const fleet = store.get(driverId);
-    if (!fleet) return [];
-    let records = ordered(fleet);
-    if (filter.status !== undefined) {
-      if (!VEHICLE_STATUSES.includes(filter.status)) {
-        throw new VehicleError(`Unknown vehicle status: ${filter.status}`, 'VEHICLE_STATUS');
-      }
-      records = records.filter((v) => v.status === filter.status);
+  async function list(driverId, filter = {}) {
+    if (filter.status !== undefined && !VEHICLE_STATUSES.includes(filter.status)) {
+      throw new VehicleError(`Unknown vehicle status: ${filter.status}`, 'VEHICLE_STATUS');
     }
-    if (filter.fuelCategory !== undefined) {
-      records = records.filter((v) => v.fuel.category === filter.fuelCategory);
-    }
+    const records = await repo.listByDriver(driverId, filter);
     return records.map(snapshot);
   }
 
@@ -481,10 +622,9 @@ export function createVehicleRegistry(config = {}) {
   }
 
   /** Get the driver's primary active vehicle, or `null` if none is active. */
-  function getPrimary(driverId) {
-    const fleet = store.get(driverId);
-    if (!fleet) return null;
-    const primary = ordered(fleet).find((v) => v.status === 'active' && v.primary);
+  async function getPrimary(driverId) {
+    const fleet = await repo.listByDriver(driverId);
+    const primary = fleet.find((v) => v.status === 'active' && v.primary);
     return primary ? snapshot(primary) : null;
   }
 
@@ -509,10 +649,10 @@ export function createVehicleRegistry(config = {}) {
    * values and the whole vehicle is re-validated, so e.g. switching to a
    * chargeable fuel type requires supplying battery/connector fields too.
    * Lifecycle (`status`) and `primary` are managed via their own methods.
-   * @returns {object} The updated, frozen vehicle record.
+   * @returns {Promise<object>} The updated, frozen vehicle record.
    */
-  function update(driverId, vehicleId, patch = {}) {
-    const record = requireVehicle(driverId, vehicleId);
+  async function update(driverId, vehicleId, patch = {}) {
+    const record = await requireVehicle(driverId, vehicleId);
     if (patch === null || typeof patch !== 'object') {
       throw new VehicleError('A vehicle patch must be an object', 'VEHICLE_FIELD');
     }
@@ -520,9 +660,9 @@ export function createVehicleRegistry(config = {}) {
     const core = validateVehicle(merged, validateOpts);
 
     if (core.vin !== record.vin) {
-      const fleet = store.get(driverId);
-      for (const existing of fleet.values()) {
-        if (existing !== record && existing.vin === core.vin && existing.status !== 'retired') {
+      const fleet = await repo.listByDriver(driverId);
+      for (const existing of fleet) {
+        if (existing.id !== record.id && existing.vin === core.vin && existing.status !== 'retired') {
           throw new VehicleError(
             `Vehicle with VIN ${core.vin} is already registered for this driver`,
             'VEHICLE_DUPLICATE',
@@ -533,27 +673,28 @@ export function createVehicleRegistry(config = {}) {
 
     Object.assign(record, core);
     record.updatedAt = now();
+    await repo.update(record);
     return snapshot(record);
   }
 
   /**
    * Change a vehicle's lifecycle status. Deactivating or retiring the current
    * primary re-assigns primary to another active vehicle.
-   * @returns {object} The updated, frozen vehicle record.
+   * @returns {Promise<object>} The updated, frozen vehicle record.
    */
-  function setStatus(driverId, vehicleId, status) {
+  async function setStatus(driverId, vehicleId, status) {
     if (!VEHICLE_STATUSES.includes(status)) {
       throw new VehicleError(`Unknown vehicle status: ${status}`, 'VEHICLE_STATUS');
     }
-    const record = requireVehicle(driverId, vehicleId);
-    const fleet = store.get(driverId);
+    const record = await requireVehicle(driverId, vehicleId);
     if (record.status !== status) {
       record.status = status;
       if (status !== 'active') record.primary = false;
       record.updatedAt = now();
-      reconcilePrimary(fleet);
+      await repo.update(record);
+      await reconcilePrimary(driverId);
     }
-    return snapshot(record);
+    return snapshot(await repo.findById(driverId, vehicleId));
   }
 
   /** Mark a vehicle active. */
@@ -574,30 +715,33 @@ export function createVehicleRegistry(config = {}) {
   /**
    * Make an active vehicle the driver's primary one, clearing the flag on the
    * others. The target must be active.
-   * @returns {object} The updated, frozen vehicle record.
+   * @returns {Promise<object>} The updated, frozen vehicle record.
    */
-  function setPrimary(driverId, vehicleId) {
-    const record = requireVehicle(driverId, vehicleId);
+  async function setPrimary(driverId, vehicleId) {
+    const record = await requireVehicle(driverId, vehicleId);
     if (record.status !== 'active') {
       throw new VehicleError('Only an active vehicle can be the primary vehicle', 'VEHICLE_STATUS');
     }
-    const fleet = store.get(driverId);
-    for (const v of fleet.values()) v.primary = v === record;
-    record.updatedAt = now();
-    return snapshot(record);
+    const fleet = await repo.listByDriver(driverId);
+    for (const v of fleet) {
+      const shouldBePrimary = v.id === record.id;
+      if (v.primary !== shouldBePrimary) {
+        v.primary = shouldBePrimary;
+        await repo.update(v);
+      }
+    }
+    return snapshot(await repo.findById(driverId, vehicleId));
   }
 
   /**
    * Remove a vehicle from the registry entirely. Removing the primary re-assigns
    * primary to another active vehicle.
-   * @returns {boolean} Whether a vehicle was removed.
+   * @returns {Promise<boolean>} Whether a vehicle was removed.
    */
-  function remove(driverId, vehicleId) {
-    const fleet = store.get(driverId);
-    if (!fleet || !fleet.has(vehicleId)) return false;
-    fleet.delete(vehicleId);
-    reconcilePrimary(fleet);
-    return true;
+  async function remove(driverId, vehicleId) {
+    const removed = await repo.remove(driverId, vehicleId);
+    if (removed) await reconcilePrimary(driverId);
+    return removed;
   }
 
   return {
@@ -613,6 +757,6 @@ export function createVehicleRegistry(config = {}) {
     retire,
     setPrimary,
     remove,
-    store,
+    repo,
   };
 }

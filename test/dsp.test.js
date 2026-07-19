@@ -211,9 +211,9 @@ test('validateDspLink rejects an unknown partner and a missing account id', () =
 
 // --- manager: link -------------------------------------------------------
 
-test('link stores an active link and freezes the record', () => {
+test('link stores an active link and freezes the record', async () => {
   const dsp = manager();
-  const record = dsp.link('drv_1', linkInput());
+  const record = await dsp.link('drv_1', linkInput());
   assert.equal(record.id, 'dsp_1');
   assert.equal(record.driverId, 'drv_1');
   assert.equal(record.partner.id, 'doordash');
@@ -225,112 +225,112 @@ test('link stores an active link and freezes the record', () => {
   assert.throws(() => { record.status = 'x'; }, TypeError);
 });
 
-test('link honours an explicit status and id', () => {
+test('link honours an explicit status and id', async () => {
   const dsp = manager();
-  const record = dsp.link('drv_1', linkInput(), { status: 'pending', id: 'custom_1' });
+  const record = await dsp.link('drv_1', linkInput(), { status: 'pending', id: 'custom_1' });
   assert.equal(record.id, 'custom_1');
   assert.equal(record.status, 'pending');
-  assert.throws(() => dsp.link('drv_1', linkInput({ partner: 'uber_eats' }), { status: 'bogus' }), (e) => e.code === 'DSP_STATUS');
+  await assert.rejects(() => dsp.link('drv_1', linkInput({ partner: 'uber_eats' }), { status: 'bogus' }), (e) => e.code === 'DSP_STATUS');
 });
 
-test('link rejects duplicate partners unless the prior link was unlinked', () => {
+test('link rejects duplicate partners unless the prior link was unlinked', async () => {
   const dsp = manager();
-  const first = dsp.link('drv_1', linkInput());
-  assert.throws(() => dsp.link('drv_1', linkInput()), (e) => e.code === 'DSP_DUPLICATE');
+  const first = await dsp.link('drv_1', linkInput());
+  await assert.rejects(() => dsp.link('drv_1', linkInput()), (e) => e.code === 'DSP_DUPLICATE');
 
-  dsp.unlink('drv_1', first.id);
-  const relinked = dsp.link('drv_1', linkInput());
+  await dsp.unlink('drv_1', first.id);
+  const relinked = await dsp.link('drv_1', linkInput());
   assert.equal(relinked.partner.id, 'doordash');
   assert.equal(relinked.status, 'active');
 });
 
-test('link requires a driverId', () => {
+test('link requires a driverId', async () => {
   const dsp = manager();
-  assert.throws(() => dsp.link('', linkInput()), (e) => e.code === 'DSP_DRIVER');
+  await assert.rejects(() => dsp.link('', linkInput()), (e) => e.code === 'DSP_DRIVER');
 });
 
 // --- manager: get / list -------------------------------------------------
 
-test('list returns links oldest-first and filters by status/category', () => {
+test('list returns links oldest-first and filters by status/category', async () => {
   const dsp = manager();
-  dsp.link('drv_1', linkInput({ partner: 'doordash' }));            // food
-  dsp.link('drv_1', linkInput({ partner: 'instacart' }));           // grocery
-  const flex = dsp.link('drv_1', linkInput({ partner: 'amazon_flex' })); // parcel
-  dsp.suspend('drv_1', flex.id);
+  await dsp.link('drv_1', linkInput({ partner: 'doordash' }));            // food
+  await dsp.link('drv_1', linkInput({ partner: 'instacart' }));           // grocery
+  const flex = await dsp.link('drv_1', linkInput({ partner: 'amazon_flex' })); // parcel
+  await dsp.suspend('drv_1', flex.id);
 
-  assert.deepEqual(dsp.list('drv_1').map((l) => l.partner.id), ['doordash', 'instacart', 'amazon_flex']);
-  assert.deepEqual(dsp.listActive('drv_1').map((l) => l.partner.id), ['doordash', 'instacart']);
-  assert.deepEqual(dsp.list('drv_1', { category: 'grocery' }).map((l) => l.partner.id), ['instacart']);
-  assert.deepEqual(dsp.list('drv_1', { status: 'suspended' }).map((l) => l.partner.id), ['amazon_flex']);
-  assert.deepEqual(dsp.list('drv_unknown'), []);
-  assert.throws(() => dsp.list('drv_1', { status: 'bogus' }), (e) => e.code === 'DSP_STATUS');
+  assert.deepEqual((await dsp.list('drv_1')).map((l) => l.partner.id), ['doordash', 'instacart', 'amazon_flex']);
+  assert.deepEqual((await dsp.listActive('drv_1')).map((l) => l.partner.id), ['doordash', 'instacart']);
+  assert.deepEqual((await dsp.list('drv_1', { category: 'grocery' })).map((l) => l.partner.id), ['instacart']);
+  assert.deepEqual((await dsp.list('drv_1', { status: 'suspended' })).map((l) => l.partner.id), ['amazon_flex']);
+  assert.deepEqual(await dsp.list('drv_unknown'), []);
+  await assert.rejects(() => dsp.list('drv_1', { status: 'bogus' }), (e) => e.code === 'DSP_STATUS');
 });
 
-test('get throws for an unknown link', () => {
+test('get throws for an unknown link', async () => {
   const dsp = manager();
-  assert.throws(() => dsp.get('drv_1', 'missing'), (e) => e.code === 'DSP_NOT_FOUND');
+  await assert.rejects(() => dsp.get('drv_1', 'missing'), (e) => e.code === 'DSP_NOT_FOUND');
 });
 
 // --- manager: update / updateRate ---------------------------------------
 
-test('updateRate replaces the variable payout card', () => {
+test('updateRate replaces the variable payout card', async () => {
   const dsp = manager();
-  const record = dsp.link('drv_1', linkInput());
-  const updated = dsp.updateRate('drv_1', record.id, {
+  const record = await dsp.link('drv_1', linkInput());
+  const updated = await dsp.updateRate('drv_1', record.id, {
     components: [{ type: 'per_hour', rate: 20 }],
     peakMultiplier: 2,
   });
   assert.equal(updated.payoutRate.components[0].type, 'per_hour');
   assert.equal(updated.payoutRate.peakMultiplier, 2);
-  assert.throws(() => dsp.updateRate('drv_1', record.id, { components: [] }), (e) => e.code === 'DSP_RATE');
+  await assert.rejects(() => dsp.updateRate('drv_1', record.id, { components: [] }), (e) => e.code === 'DSP_RATE');
 });
 
-test('update changes descriptive fields but not the partner', () => {
+test('update changes descriptive fields but not the partner', async () => {
   const dsp = manager();
-  const record = dsp.link('drv_1', linkInput());
-  const updated = dsp.update('drv_1', record.id, { label: 'Evenings', externalAccountId: 'dd-acct-999' });
+  const record = await dsp.link('drv_1', linkInput());
+  const updated = await dsp.update('drv_1', record.id, { label: 'Evenings', externalAccountId: 'dd-acct-999' });
   assert.equal(updated.label, 'Evenings');
   assert.equal(updated.displayName, 'Evenings');
   assert.equal(updated.externalAccountId, 'dd-acct-999');
   assert.equal(updated.partner.id, 'doordash');
-  assert.throws(() => dsp.update('drv_1', record.id, { partner: 'uber_eats' }), (e) => e.code === 'DSP_FIELD');
+  await assert.rejects(() => dsp.update('drv_1', record.id, { partner: 'uber_eats' }), (e) => e.code === 'DSP_FIELD');
 });
 
 // --- manager: lifecycle --------------------------------------------------
 
-test('activate / suspend / unlink move a link through its lifecycle', () => {
+test('activate / suspend / unlink move a link through its lifecycle', async () => {
   const dsp = manager();
-  const record = dsp.link('drv_1', linkInput(), { status: 'pending' });
-  assert.equal(dsp.activate('drv_1', record.id).status, 'active');
-  assert.equal(dsp.suspend('drv_1', record.id).status, 'suspended');
-  assert.equal(dsp.unlink('drv_1', record.id).status, 'unlinked');
+  const record = await dsp.link('drv_1', linkInput(), { status: 'pending' });
+  assert.equal((await dsp.activate('drv_1', record.id)).status, 'active');
+  assert.equal((await dsp.suspend('drv_1', record.id)).status, 'suspended');
+  assert.equal((await dsp.unlink('drv_1', record.id)).status, 'unlinked');
   assert.ok(LINK_STATUSES.includes('active'));
-  assert.throws(() => dsp.setStatus('drv_1', record.id, 'bogus'), (e) => e.code === 'DSP_STATUS');
+  await assert.rejects(() => dsp.setStatus('drv_1', record.id, 'bogus'), (e) => e.code === 'DSP_STATUS');
 });
 
 // --- manager: estimatePayout / remove -----------------------------------
 
-test('estimatePayout computes from the stored variable rate card', () => {
+test('estimatePayout computes from the stored variable rate card', async () => {
   const dsp = manager();
-  const record = dsp.link('drv_1', linkInput({
+  const record = await dsp.link('drv_1', linkInput({
     payoutRate: rateCard({
       components: [{ type: 'per_delivery', rate: 4 }, { type: 'per_mile', rate: 0.6 }],
       peakMultiplier: 2,
     }),
   }));
-  const normal = dsp.estimatePayout('drv_1', record.id, { deliveries: 5, miles: 20 });
+  const normal = await dsp.estimatePayout('drv_1', record.id, { deliveries: 5, miles: 20 });
   assert.equal(normal.total, 32); // 5*4 + 20*0.6 = 32
-  const peak = dsp.estimatePayout('drv_1', record.id, { deliveries: 5, miles: 20 }, { peak: true });
+  const peak = await dsp.estimatePayout('drv_1', record.id, { deliveries: 5, miles: 20 }, { peak: true });
   assert.equal(peak.total, 64); // 32 * 2
-  assert.throws(() => dsp.estimatePayout('drv_1', 'missing', {}), (e) => e.code === 'DSP_NOT_FOUND');
+  await assert.rejects(() => dsp.estimatePayout('drv_1', 'missing', {}), (e) => e.code === 'DSP_NOT_FOUND');
 });
 
-test('remove deletes a link and reports whether it existed', () => {
+test('remove deletes a link and reports whether it existed', async () => {
   const dsp = manager();
-  const record = dsp.link('drv_1', linkInput());
-  assert.equal(dsp.remove('drv_1', record.id), true);
-  assert.equal(dsp.remove('drv_1', record.id), false);
-  assert.equal(dsp.list('drv_1').length, 0);
+  const record = await dsp.link('drv_1', linkInput());
+  assert.equal(await dsp.remove('drv_1', record.id), true);
+  assert.equal(await dsp.remove('drv_1', record.id), false);
+  assert.equal((await dsp.list('drv_1')).length, 0);
 });
 
 // --- config --------------------------------------------------------------

@@ -15,6 +15,10 @@ import { createFuelLogger, createPostgresFuelRepo } from './fuel.js';
 import { createReceiptProcessor, createPostgresReceiptRepo } from './receipts.js';
 import { createExpenseTracker, createPostgresExpenseRepo } from './expenses.js';
 import { createEstimatedPaymentTracker, createPostgresEstimatedPaymentRepo } from './estimated-payments.js';
+import { createDspConnectionManager, createPostgresDspLinkRepo } from './dsp.js';
+import { createRouteHistorySyncWorker, createPostgresRouteSyncRepo } from './route-sync.js';
+import { createVehicleRegistry, createPostgresVehicleRepo } from './vehicles.js';
+import { createProfileWizard, createPostgresOnboardingRepo } from './onboarding.js';
 import { createDbClient } from './db.js';
 import { createRouter } from './router.js';
 import { sendJson, handleError } from './http-utils.js';
@@ -26,6 +30,10 @@ import { registerFuelRoutes } from './routes/fuel.js';
 import { registerReceiptRoutes } from './routes/receipts.js';
 import { registerExpenseRoutes } from './routes/expenses.js';
 import { registerEstimatedPaymentRoutes } from './routes/estimated-payments.js';
+import { registerDspRoutes } from './routes/dsp.js';
+import { registerRouteSyncRoutes } from './routes/route-sync.js';
+import { registerVehicleRoutes } from './routes/vehicles.js';
+import { registerOnboardingRoutes } from './routes/onboarding.js';
 
 export const DEFAULT_PORT = 3000;
 
@@ -71,6 +79,18 @@ function resolveServices(config = {}) {
     receiptProcessor = createReceiptProcessor({ now, repo: db ? createPostgresReceiptRepo(db) : undefined }),
     expenseTracker = createExpenseTracker({ now, repo: db ? createPostgresExpenseRepo(db) : undefined }),
     paymentTracker = createEstimatedPaymentTracker({ now, repo: db ? createPostgresEstimatedPaymentRepo(db) : undefined }),
+    connections = createDspConnectionManager({ now, repo: db ? createPostgresDspLinkRepo(db) : undefined }),
+    // No real DSP portal integrated yet — only route-sync's read-only routes
+    // (listRoutes/getSyncState) are exposed over HTTP, so `portal` is never
+    // actually invoked from a request; the worker just requires one to construct.
+    routeSync = createRouteHistorySyncWorker({
+      now,
+      connections,
+      portal: async () => [],
+      repo: db ? createPostgresRouteSyncRepo(db) : undefined,
+    }),
+    vehicleRegistry = createVehicleRegistry({ now, repo: db ? createPostgresVehicleRepo(db) : undefined }),
+    profileWizard = createProfileWizard({ now, repo: db ? createPostgresOnboardingRepo(db) : undefined }),
   } = config;
   return {
     now,
@@ -82,6 +102,10 @@ function resolveServices(config = {}) {
     receiptProcessor,
     expenseTracker,
     paymentTracker,
+    connections,
+    routeSync,
+    vehicleRegistry,
+    profileWizard,
   };
 }
 
@@ -95,6 +119,10 @@ function buildRouter(services) {
   registerReceiptRoutes(router, services);
   registerExpenseRoutes(router, services);
   registerEstimatedPaymentRoutes(router, services);
+  registerDspRoutes(router, services);
+  registerRouteSyncRoutes(router, services);
+  registerVehicleRoutes(router, services);
+  registerOnboardingRoutes(router, services);
   return router;
 }
 
@@ -137,6 +165,10 @@ export function createRequestHandler(config = {}) {
  * @param {ReturnType<import('./receipts.js').createReceiptProcessor>} [config.receiptProcessor]
  * @param {ReturnType<import('./expenses.js').createExpenseTracker>} [config.expenseTracker]
  * @param {ReturnType<import('./estimated-payments.js').createEstimatedPaymentTracker>} [config.paymentTracker]
+ * @param {ReturnType<import('./dsp.js').createDspConnectionManager>} [config.connections]
+ * @param {ReturnType<import('./route-sync.js').createRouteHistorySyncWorker>} [config.routeSync]
+ * @param {ReturnType<import('./vehicles.js').createVehicleRegistry>} [config.vehicleRegistry]
+ * @param {ReturnType<import('./onboarding.js').createProfileWizard>} [config.profileWizard]
  * @returns {import('node:http').Server}
  */
 export function createServer(config = {}) {

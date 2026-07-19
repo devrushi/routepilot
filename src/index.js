@@ -43,6 +43,8 @@ export {
 
 export {
   createProfileWizard,
+  createInMemoryOnboardingRepo,
+  createPostgresOnboardingRepo,
   BUSINESS_ENTITY_TYPES,
   OPERATING_REGIONS,
   WizardError,
@@ -65,6 +67,8 @@ export {
 
 export {
   createVehicleRegistry,
+  createInMemoryVehicleRepo,
+  createPostgresVehicleRepo,
   validateVehicle,
   validateVin,
   computeVinCheckDigit,
@@ -84,6 +88,8 @@ export {
 
 export {
   createDspConnectionManager,
+  createInMemoryDspLinkRepo,
+  createPostgresDspLinkRepo,
   validateDspLink,
   validatePayoutRate,
   computePayout,
@@ -95,6 +101,8 @@ export {
 
 export {
   createRouteHistorySyncWorker,
+  createInMemoryRouteSyncRepo,
+  createPostgresRouteSyncRepo,
   normalizeRoute,
   normalizeStatus,
   ROUTE_STATUSES,

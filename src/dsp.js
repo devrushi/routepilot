@@ -318,6 +318,144 @@ export function validateDspLink(input = {}, opts = {}) {
   };
 }
 
+/** In-memory DSP link repo (default) — nested Map-backed, async interface. */
+export function createInMemoryDspLinkRepo() {
+  const byDriver = new Map(); // driverId -> Map(id -> record)
+
+  function driverLinks(driverId) {
+    let links = byDriver.get(driverId);
+    if (!links) {
+      links = new Map();
+      byDriver.set(driverId, links);
+    }
+    return links;
+  }
+
+  return {
+    async insert(record) {
+      driverLinks(record.driverId).set(record.id, structuredClone(record));
+    },
+    async findById(driverId, id) {
+      const links = byDriver.get(driverId);
+      const record = links && links.get(id);
+      return record ? structuredClone(record) : null;
+    },
+    async update(record) {
+      driverLinks(record.driverId).set(record.id, structuredClone(record));
+    },
+    async listByDriver(driverId, filter = {}) {
+      const links = byDriver.get(driverId);
+      if (!links) return [];
+      let records = [...links.values()].sort((a, b) => a.linkedAt - b.linkedAt || a.seq - b.seq);
+      if (filter.status !== undefined) records = records.filter((l) => l.status === filter.status);
+      if (filter.category !== undefined) records = records.filter((l) => l.partner.category === filter.category);
+      return records.map((r) => structuredClone(r));
+    },
+    async remove(driverId, id) {
+      const links = byDriver.get(driverId);
+      if (!links || !links.has(id)) return false;
+      links.delete(id);
+      return true;
+    },
+    // Every driver id that has ever linked at least one DSP partner — used
+    // by route-sync.js to discover which drivers to sweep, so it doesn't
+    // need to reach into this module's storage internals.
+    async listDriverIds() {
+      return [...byDriver.keys()];
+    },
+  };
+}
+
+function parseJsonColumn(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+/**
+ * Postgres-backed DSP link repo. Expects a `dsp_links` table (see
+ * db/migrations); `partner`/`payoutRate` are JSONB (nested objects,
+ * always read/written whole).
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresDspLinkRepo(sql) {
+  function fromRow(row) {
+    return {
+      id: row.id,
+      driverId: row.driver_id,
+      partner: parseJsonColumn(row.partner, null),
+      externalAccountId: row.external_account_id,
+      label: row.label,
+      displayName: row.display_name,
+      payoutRate: parseJsonColumn(row.payout_rate, null),
+      status: row.status,
+      linkedAt: Number(row.linked_at),
+      updatedAt: Number(row.updated_at),
+      seq: Number(row.seq),
+    };
+  }
+
+  return {
+    async insert(record) {
+      await sql`
+        INSERT INTO dsp_links (id, driver_id, partner, external_account_id, label, display_name, payout_rate, status, linked_at, updated_at, seq)
+        VALUES (
+          ${record.id}, ${record.driverId}, ${JSON.stringify(record.partner)}::jsonb, ${record.externalAccountId},
+          ${record.label}, ${record.displayName}, ${JSON.stringify(record.payoutRate)}::jsonb, ${record.status},
+          ${record.linkedAt}, ${record.updatedAt}, ${record.seq}
+        )
+      `;
+    },
+    async findById(driverId, id) {
+      const rows = await sql`SELECT * FROM dsp_links WHERE driver_id = ${driverId} AND id = ${id} LIMIT 1`;
+      return rows[0] ? fromRow(rows[0]) : null;
+    },
+    async update(record) {
+      await sql`
+        UPDATE dsp_links SET
+          external_account_id = ${record.externalAccountId},
+          label = ${record.label},
+          display_name = ${record.displayName},
+          payout_rate = ${JSON.stringify(record.payoutRate)}::jsonb,
+          status = ${record.status},
+          updated_at = ${record.updatedAt}
+        WHERE id = ${record.id}
+      `;
+    },
+    async listByDriver(driverId, filter = {}) {
+      if (filter.status !== undefined && filter.category !== undefined) {
+        const rows = await sql`
+          SELECT dl.* FROM dsp_links dl
+          WHERE dl.driver_id = ${driverId} AND dl.status = ${filter.status} AND dl.partner->>'category' = ${filter.category}
+          ORDER BY dl.linked_at ASC, dl.seq ASC
+        `;
+        return rows.map(fromRow);
+      }
+      if (filter.status !== undefined) {
+        const rows = await sql`
+          SELECT * FROM dsp_links WHERE driver_id = ${driverId} AND status = ${filter.status} ORDER BY linked_at ASC, seq ASC
+        `;
+        return rows.map(fromRow);
+      }
+      if (filter.category !== undefined) {
+        const rows = await sql`
+          SELECT * FROM dsp_links WHERE driver_id = ${driverId} AND partner->>'category' = ${filter.category} ORDER BY linked_at ASC, seq ASC
+        `;
+        return rows.map(fromRow);
+      }
+      const rows = await sql`SELECT * FROM dsp_links WHERE driver_id = ${driverId} ORDER BY linked_at ASC, seq ASC`;
+      return rows.map(fromRow);
+    },
+    async remove(driverId, id) {
+      const rows = await sql`DELETE FROM dsp_links WHERE driver_id = ${driverId} AND id = ${id} RETURNING id`;
+      return rows.length > 0;
+    },
+    async listDriverIds() {
+      const rows = await sql`SELECT DISTINCT driver_id FROM dsp_links`;
+      return rows.map((r) => r.driver_id);
+    },
+  };
+}
+
 /**
  * Create the DSP linking interface: a per-driver registry of DSP links, each
  * carrying its own variable payout rate card. A driver may link **multiple**
@@ -325,7 +463,7 @@ export function validateDspLink(input = {}, opts = {}) {
  * unlinked.
  *
  * @param {object} [config]
- * @param {Map} [config.store] Per-driver link store (defaults in-memory).
+ * @param {{insert:Function, findById:Function, update:Function, listByDriver:Function, remove:Function, listDriverIds:Function}} [config.repo] DSP link repo (defaults to an in-memory one).
  * @param {Array} [config.partners] Partner catalogue.
  * @param {Array} [config.rateTypes] Rate-type catalogue.
  * @param {() => number} [config.now] Clock in ms (injectable for tests).
@@ -333,7 +471,7 @@ export function validateDspLink(input = {}, opts = {}) {
  */
 export function createDspConnectionManager(config = {}) {
   const {
-    store = new Map(),
+    repo = createInMemoryDspLinkRepo(),
     partners = DSP_PARTNERS,
     rateTypes = PAYOUT_RATE_TYPES,
     now = () => Date.now(),
@@ -348,30 +486,17 @@ export function createDspConnectionManager(config = {}) {
   }
 
   const validateOpts = { partners, rateTypes };
+  // Tie-breaker for links created within the same millisecond — owned by
+  // the tracker (not the repo/DB) since it's purely a within-process
+  // ordering aid, not data that needs cross-instance consistency.
+  let seqCounter = 0;
 
-  function requireDriver(driverId) {
-    if (!driverId) {
-      throw new DspError('A driverId is required', 'DSP_DRIVER');
-    }
-    let links = store.get(driverId);
-    if (!links) {
-      links = new Map();
-      store.set(driverId, links);
-    }
-    return links;
-  }
-
-  function requireLink(driverId, linkId) {
-    const links = store.get(driverId);
-    const record = links && links.get(linkId);
+  async function requireLink(driverId, linkId) {
+    const record = await repo.findById(driverId, linkId);
     if (!record) {
       throw new DspError(`No DSP link "${linkId}" for driver "${driverId}"`, 'DSP_NOT_FOUND');
     }
     return record;
-  }
-
-  function ordered(links) {
-    return [...links.values()].sort((a, b) => a.linkedAt - b.linkedAt || (a.seq - b.seq));
   }
 
   function snapshot(record) {
@@ -387,13 +512,16 @@ export function createDspConnectionManager(config = {}) {
    * @param {object} [options]
    * @param {string} [options.status='active'] Initial lifecycle status.
    * @param {string} [options.id] Explicit link id (defaults to a generated one).
-   * @returns {object} The stored, frozen link record.
+   * @returns {Promise<object>} The stored, frozen link record.
    */
-  function link(driverId, input, options = {}) {
-    const links = requireDriver(driverId);
+  async function link(driverId, input, options = {}) {
+    if (!driverId) {
+      throw new DspError('A driverId is required', 'DSP_DRIVER');
+    }
     const core = validateDspLink(input, validateOpts);
 
-    for (const existing of links.values()) {
+    const existingLinks = await repo.listByDriver(driverId);
+    for (const existing of existingLinks) {
       if (existing.partner.id === core.partner.id && existing.status !== 'unlinked') {
         throw new DspError(
           `${core.partner.label} is already linked for this driver`,
@@ -407,7 +535,7 @@ export function createDspConnectionManager(config = {}) {
       throw new DspError(`Unknown link status: ${status}`, 'DSP_STATUS');
     }
     const id = options.id ?? generateId();
-    if (links.has(id)) {
+    if (await repo.findById(driverId, id)) {
       throw new DspError(`Link id "${id}" already exists for this driver`, 'DSP_DUPLICATE');
     }
 
@@ -419,15 +547,15 @@ export function createDspConnectionManager(config = {}) {
       status,
       linkedAt: timestamp,
       updatedAt: timestamp,
-      seq: links.size,
+      seq: seqCounter++,
     };
-    links.set(id, record);
+    await repo.insert(record);
     return snapshot(record);
   }
 
   /** Get one link (frozen) or throw `DSP_NOT_FOUND`. */
-  function get(driverId, linkId) {
-    return snapshot(requireLink(driverId, linkId));
+  async function get(driverId, linkId) {
+    return snapshot(await requireLink(driverId, linkId));
   }
 
   /**
@@ -436,21 +564,13 @@ export function createDspConnectionManager(config = {}) {
    * @param {object} [filter]
    * @param {string} [filter.status] Only links in this lifecycle status.
    * @param {string} [filter.category] Only links whose partner is in this category.
-   * @returns {object[]} Frozen link records.
+   * @returns {Promise<object[]>} Frozen link records.
    */
-  function list(driverId, filter = {}) {
-    const links = store.get(driverId);
-    if (!links) return [];
-    let records = ordered(links);
-    if (filter.status !== undefined) {
-      if (!LINK_STATUSES.includes(filter.status)) {
-        throw new DspError(`Unknown link status: ${filter.status}`, 'DSP_STATUS');
-      }
-      records = records.filter((l) => l.status === filter.status);
+  async function list(driverId, filter = {}) {
+    if (filter.status !== undefined && !LINK_STATUSES.includes(filter.status)) {
+      throw new DspError(`Unknown link status: ${filter.status}`, 'DSP_STATUS');
     }
-    if (filter.category !== undefined) {
-      records = records.filter((l) => l.partner.category === filter.category);
-    }
+    const records = await repo.listByDriver(driverId, filter);
     return records.map(snapshot);
   }
 
@@ -461,12 +581,13 @@ export function createDspConnectionManager(config = {}) {
 
   /**
    * Replace a link's variable payout rate card.
-   * @returns {object} The updated, frozen link record.
+   * @returns {Promise<object>} The updated, frozen link record.
    */
-  function updateRate(driverId, linkId, payoutRate) {
-    const record = requireLink(driverId, linkId);
+  async function updateRate(driverId, linkId, payoutRate) {
+    const record = await requireLink(driverId, linkId);
     record.payoutRate = validatePayoutRate(payoutRate, { rateTypes });
     record.updatedAt = now();
+    await repo.update(record);
     return snapshot(record);
   }
 
@@ -474,10 +595,10 @@ export function createDspConnectionManager(config = {}) {
    * Update a link's descriptive fields (`label`, `externalAccountId`, and — via a
    * whole new card — `payoutRate`). The partner of an existing link cannot be
    * changed; unlink and link a different partner instead.
-   * @returns {object} The updated, frozen link record.
+   * @returns {Promise<object>} The updated, frozen link record.
    */
-  function update(driverId, linkId, patch = {}) {
-    const record = requireLink(driverId, linkId);
+  async function update(driverId, linkId, patch = {}) {
+    const record = await requireLink(driverId, linkId);
     if (patch === null || typeof patch !== 'object') {
       throw new DspError('A link patch must be an object', 'DSP_FIELD');
     }
@@ -496,21 +617,23 @@ export function createDspConnectionManager(config = {}) {
     record.displayName = core.displayName;
     record.payoutRate = core.payoutRate;
     record.updatedAt = now();
+    await repo.update(record);
     return snapshot(record);
   }
 
   /**
    * Change a link's lifecycle status.
-   * @returns {object} The updated, frozen link record.
+   * @returns {Promise<object>} The updated, frozen link record.
    */
-  function setStatus(driverId, linkId, status) {
+  async function setStatus(driverId, linkId, status) {
     if (!LINK_STATUSES.includes(status)) {
       throw new DspError(`Unknown link status: ${status}`, 'DSP_STATUS');
     }
-    const record = requireLink(driverId, linkId);
+    const record = await requireLink(driverId, linkId);
     if (record.status !== status) {
       record.status = status;
       record.updatedAt = now();
+      await repo.update(record);
     }
     return snapshot(record);
   }
@@ -536,27 +659,30 @@ export function createDspConnectionManager(config = {}) {
    * @param {string} linkId
    * @param {object} [work] Work batch (see {@link computePayout}).
    * @param {object} [options] `{ peak }` (see {@link computePayout}).
-   * @returns {object} Frozen payout breakdown.
+   * @returns {Promise<object>} Frozen payout breakdown.
    */
-  function estimatePayout(driverId, linkId, work = {}, options = {}) {
-    const record = requireLink(driverId, linkId);
+  async function estimatePayout(driverId, linkId, work = {}, options = {}) {
+    const record = await requireLink(driverId, linkId);
     return computePayout(record.payoutRate, work, options);
   }
 
   /**
    * Remove a link from the registry entirely.
-   * @returns {boolean} Whether a link was removed.
+   * @returns {Promise<boolean>} Whether a link was removed.
    */
   function remove(driverId, linkId) {
-    const links = store.get(driverId);
-    if (!links || !links.has(linkId)) return false;
-    links.delete(linkId);
-    return true;
+    return repo.remove(driverId, linkId);
+  }
+
+  /** Every driver id that has ever linked at least one DSP partner (see route-sync.js). */
+  function listDriverIds() {
+    return repo.listDriverIds();
   }
 
   return {
     link,
     get,
+    listDriverIds,
     list,
     listActive,
     updateRate,
@@ -567,6 +693,6 @@ export function createDspConnectionManager(config = {}) {
     unlink,
     estimatePayout,
     remove,
-    store,
+    repo,
   };
 }

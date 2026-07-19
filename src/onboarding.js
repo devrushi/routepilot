@@ -85,10 +85,68 @@ function taxResidencyStep(jurisdictions) {
   };
 }
 
+/** In-memory onboarding wizard-state repo (default) — one record per user, async interface. */
+export function createInMemoryOnboardingRepo() {
+  const byUser = new Map();
+  return {
+    async find(userId) {
+      const state = byUser.get(userId);
+      return state ? structuredClone(state) : null;
+    },
+    async save(state) {
+      byUser.set(state.userId, structuredClone(state));
+    },
+  };
+}
+
+function parseJsonColumn(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+/**
+ * Postgres-backed wizard-state repo. Expects an `onboarding_wizard_state`
+ * table (see db/migrations); `answers`/`profile` are JSONB — heterogeneous,
+ * step-shaped data not worth normalizing into columns.
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresOnboardingRepo(sql) {
+  function fromRow(row) {
+    return {
+      userId: row.user_id,
+      status: row.status,
+      stepIndex: row.step_index,
+      answers: parseJsonColumn(row.answers, {}),
+      startedAt: Number(row.started_at),
+      updatedAt: Number(row.updated_at),
+      completedAt: row.completed_at === null ? null : Number(row.completed_at),
+      profile: parseJsonColumn(row.profile, null),
+    };
+  }
+  return {
+    async find(userId) {
+      const rows = await sql`SELECT * FROM onboarding_wizard_state WHERE user_id = ${userId} LIMIT 1`;
+      return rows[0] ? fromRow(rows[0]) : null;
+    },
+    async save(state) {
+      await sql`
+        INSERT INTO onboarding_wizard_state (user_id, status, step_index, answers, started_at, updated_at, completed_at, profile)
+        VALUES (
+          ${state.userId}, ${state.status}, ${state.stepIndex}, ${JSON.stringify(state.answers)}::jsonb,
+          ${state.startedAt}, ${state.updatedAt}, ${state.completedAt}, ${state.profile ? JSON.stringify(state.profile) : null}::jsonb
+        )
+        ON CONFLICT (user_id) DO UPDATE SET
+          status = EXCLUDED.status, step_index = EXCLUDED.step_index, answers = EXCLUDED.answers,
+          updated_at = EXCLUDED.updated_at, completed_at = EXCLUDED.completed_at, profile = EXCLUDED.profile
+      `;
+    },
+  };
+}
+
 /**
  * Create a driver profile wizard.
  * @param {object} [config]
- * @param {Map} [config.store] Per-user wizard state store (defaults in-memory).
+ * @param {{find:Function, save:Function}} [config.repo] Wizard-state repo (defaults to an in-memory one).
  * @param {Array} [config.entityTypes] Allowed business entity types.
  * @param {Array} [config.regions] Allowed operating regions.
  * @param {Array} [config.jurisdictions] Allowed tax residency jurisdictions.
@@ -96,7 +154,7 @@ function taxResidencyStep(jurisdictions) {
  */
 export function createProfileWizard(config = {}) {
   const {
-    store = new Map(),
+    repo = createInMemoryOnboardingRepo(),
     entityTypes = BUSINESS_ENTITY_TYPES,
     regions = OPERATING_REGIONS,
     jurisdictions = TAX_JURISDICTIONS,
@@ -161,8 +219,8 @@ export function createProfileWizard(config = {}) {
 
   const stepIndexById = new Map(steps.map((s, i) => [s.id, i]));
 
-  function requireState(userId) {
-    const state = store.get(userId);
+  async function requireState(userId) {
+    const state = await repo.find(userId);
     if (!state) {
       throw new WizardError('No onboarding is in progress for this user', 'WIZARD_NOT_STARTED');
     }
@@ -204,11 +262,11 @@ export function createProfileWizard(config = {}) {
    * @param {boolean} [opts.restart=false] Discard an existing in-progress wizard.
    * @returns {object} Wizard view positioned on the first step.
    */
-  function start(userId, { restart = false } = {}) {
+  async function start(userId, { restart = false } = {}) {
     if (!userId) {
       throw new WizardError('A userId is required to start onboarding', 'WIZARD_USER');
     }
-    if (store.has(userId) && !restart) {
+    if (!restart && (await repo.find(userId))) {
       throw new WizardError('Onboarding has already been started', 'WIZARD_ALREADY_STARTED');
     }
     const state = {
@@ -221,22 +279,22 @@ export function createProfileWizard(config = {}) {
       completedAt: null,
       profile: null,
     };
-    store.set(userId, state);
+    await repo.save(state);
     return view(state);
   }
 
   /** Get the current wizard view for a user. */
-  function getState(userId) {
-    return view(requireState(userId));
+  async function getState(userId) {
+    return view(await requireState(userId));
   }
 
   /**
    * Answer the current step and advance. `stepId` must match the step the
    * driver is currently on, keeping the flow strictly ordered.
-   * @returns {object} The updated wizard view.
+   * @returns {Promise<object>} The updated wizard view.
    */
-  function submitStep(userId, stepId, value) {
-    const state = requireState(userId);
+  async function submitStep(userId, stepId, value) {
+    const state = await requireState(userId);
     if (state.status === COMPLETED) {
       throw new WizardError('Onboarding is already complete', 'WIZARD_COMPLETED');
     }
@@ -253,16 +311,17 @@ export function createProfileWizard(config = {}) {
     state.answers[current.id] = current.validate(value);
     state.stepIndex += 1;
     state.updatedAt = now();
+    await repo.save(state);
     return view(state);
   }
 
   /**
    * Step back to revise the previous step. The earlier answer is preserved so
    * it can be reviewed and re-submitted.
-   * @returns {object} The updated wizard view.
+   * @returns {Promise<object>} The updated wizard view.
    */
-  function back(userId) {
-    const state = requireState(userId);
+  async function back(userId) {
+    const state = await requireState(userId);
     if (state.status === COMPLETED) {
       throw new WizardError('Onboarding is already complete', 'WIZARD_COMPLETED');
     }
@@ -271,16 +330,17 @@ export function createProfileWizard(config = {}) {
     }
     state.stepIndex -= 1;
     state.updatedAt = now();
+    await repo.save(state);
     return view(state);
   }
 
   /**
    * Jump to a specific step by id (must already be reachable / answered) to
    * revise it. Cannot skip ahead past unanswered steps.
-   * @returns {object} The updated wizard view.
+   * @returns {Promise<object>} The updated wizard view.
    */
-  function goToStep(userId, stepId) {
-    const state = requireState(userId);
+  async function goToStep(userId, stepId) {
+    const state = await requireState(userId);
     if (state.status === COMPLETED) {
       throw new WizardError('Onboarding is already complete', 'WIZARD_COMPLETED');
     }
@@ -293,16 +353,17 @@ export function createProfileWizard(config = {}) {
     }
     state.stepIndex = target;
     state.updatedAt = now();
+    await repo.save(state);
     return view(state);
   }
 
   /**
    * Finalize the wizard into an immutable driver profile. Every step must be
    * answered first.
-   * @returns {object} The completed driver profile.
+   * @returns {Promise<object>} The completed driver profile.
    */
-  function complete(userId) {
-    const state = requireState(userId);
+  async function complete(userId) {
+    const state = await requireState(userId);
     if (state.status === COMPLETED) {
       throw new WizardError('Onboarding is already complete', 'WIZARD_ALREADY_COMPLETED');
     }
@@ -335,6 +396,7 @@ export function createProfileWizard(config = {}) {
     state.completedAt = profile.completedAt;
     state.profile = profile;
     state.updatedAt = profile.completedAt;
+    await repo.save(state);
     return profile;
   }
 
@@ -357,6 +419,6 @@ export function createProfileWizard(config = {}) {
     back,
     goToStep,
     complete,
-    store,
+    repo,
   };
 }

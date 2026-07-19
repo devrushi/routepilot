@@ -138,167 +138,167 @@ test('a plug-in hybrid is chargeable and combustion at once', () => {
 
 // --- registry: multiple active vehicles ----------------------------------
 
-test('a driver can register and keep multiple active vehicles', () => {
+test('a driver can register and keep multiple active vehicles', async () => {
   const reg = createVehicleRegistry({ now });
-  const a = reg.add('drv_1', gasCar(), { id: 'v1' });
-  const b = reg.add('drv_1', evCar(), { id: 'v2' });
-  const c = reg.add('drv_1', gasCar({ vin: FORD, make: 'Ford', model: 'F-150' }), { id: 'v3' });
+  const a = await reg.add('drv_1', gasCar(), { id: 'v1' });
+  const b = await reg.add('drv_1', evCar(), { id: 'v2' });
+  const c = await reg.add('drv_1', gasCar({ vin: FORD, make: 'Ford', model: 'F-150' }), { id: 'v3' });
 
-  const active = reg.listActive('drv_1');
+  const active = await reg.listActive('drv_1');
   assert.deepEqual(active.map((v) => v.id), ['v1', 'v2', 'v3']);
   assert.ok(active.every((v) => v.status === 'active'));
   assert.ok(Object.isFrozen(a) && Object.isFrozen(b) && Object.isFrozen(c));
 });
 
-test('exactly one active vehicle is primary and it is the first added', () => {
+test('exactly one active vehicle is primary and it is the first added', async () => {
   const reg = createVehicleRegistry({ now });
-  reg.add('drv_1', gasCar(), { id: 'v1' });
-  reg.add('drv_1', evCar(), { id: 'v2' });
-  const primaries = reg.listActive('drv_1').filter((v) => v.primary);
+  await reg.add('drv_1', gasCar(), { id: 'v1' });
+  await reg.add('drv_1', evCar(), { id: 'v2' });
+  const primaries = (await reg.listActive('drv_1')).filter((v) => v.primary);
   assert.equal(primaries.length, 1);
-  assert.equal(reg.getPrimary('drv_1').id, 'v1');
+  assert.equal((await reg.getPrimary('drv_1')).id, 'v1');
 });
 
-test('setPrimary moves the flag and requires an active vehicle', () => {
+test('setPrimary moves the flag and requires an active vehicle', async () => {
   const reg = createVehicleRegistry({ now });
-  reg.add('drv_1', gasCar(), { id: 'v1' });
-  reg.add('drv_1', evCar(), { id: 'v2' });
-  reg.setPrimary('drv_1', 'v2');
-  assert.equal(reg.getPrimary('drv_1').id, 'v2');
-  assert.equal(reg.get('drv_1', 'v1').primary, false);
+  await reg.add('drv_1', gasCar(), { id: 'v1' });
+  await reg.add('drv_1', evCar(), { id: 'v2' });
+  await reg.setPrimary('drv_1', 'v2');
+  assert.equal((await reg.getPrimary('drv_1')).id, 'v2');
+  assert.equal((await reg.get('drv_1', 'v1')).primary, false);
 
-  reg.deactivate('drv_1', 'v2');
-  assert.throws(() => reg.setPrimary('drv_1', 'v2'), (e) => e.code === 'VEHICLE_STATUS');
+  await reg.deactivate('drv_1', 'v2');
+  await assert.rejects(() => reg.setPrimary('drv_1', 'v2'), (e) => e.code === 'VEHICLE_STATUS');
 });
 
-test('deactivating the primary re-assigns primary to another active vehicle', () => {
+test('deactivating the primary re-assigns primary to another active vehicle', async () => {
   const reg = createVehicleRegistry({ now });
-  reg.add('drv_1', gasCar(), { id: 'v1' });
-  reg.add('drv_1', evCar(), { id: 'v2' });
-  assert.equal(reg.getPrimary('drv_1').id, 'v1');
+  await reg.add('drv_1', gasCar(), { id: 'v1' });
+  await reg.add('drv_1', evCar(), { id: 'v2' });
+  assert.equal((await reg.getPrimary('drv_1')).id, 'v1');
 
-  reg.deactivate('drv_1', 'v1');
-  assert.equal(reg.get('drv_1', 'v1').status, 'inactive');
-  assert.equal(reg.get('drv_1', 'v1').primary, false);
-  assert.equal(reg.getPrimary('drv_1').id, 'v2'); // promoted
+  await reg.deactivate('drv_1', 'v1');
+  assert.equal((await reg.get('drv_1', 'v1')).status, 'inactive');
+  assert.equal((await reg.get('drv_1', 'v1')).primary, false);
+  assert.equal((await reg.getPrimary('drv_1')).id, 'v2'); // promoted
 
   // Reactivating does not steal primary back.
-  reg.activate('drv_1', 'v1');
-  assert.equal(reg.getPrimary('drv_1').id, 'v2');
+  await reg.activate('drv_1', 'v1');
+  assert.equal((await reg.getPrimary('drv_1')).id, 'v2');
 });
 
-test('removing the primary promotes the next active vehicle', () => {
+test('removing the primary promotes the next active vehicle', async () => {
   const reg = createVehicleRegistry({ now });
-  reg.add('drv_1', gasCar(), { id: 'v1' });
-  reg.add('drv_1', evCar(), { id: 'v2' });
-  assert.equal(reg.remove('drv_1', 'v1'), true);
-  assert.equal(reg.getPrimary('drv_1').id, 'v2');
-  assert.equal(reg.remove('drv_1', 'nope'), false);
+  await reg.add('drv_1', gasCar(), { id: 'v1' });
+  await reg.add('drv_1', evCar(), { id: 'v2' });
+  assert.equal(await reg.remove('drv_1', 'v1'), true);
+  assert.equal((await reg.getPrimary('drv_1')).id, 'v2');
+  assert.equal(await reg.remove('drv_1', 'nope'), false);
 });
 
-test('getPrimary is null when no vehicle is active', () => {
+test('getPrimary is null when no vehicle is active', async () => {
   const reg = createVehicleRegistry({ now });
-  reg.add('drv_1', gasCar(), { id: 'v1' });
-  reg.deactivate('drv_1', 'v1');
-  assert.equal(reg.getPrimary('drv_1'), null);
-  assert.deepEqual(reg.listActive('drv_1'), []);
+  await reg.add('drv_1', gasCar(), { id: 'v1' });
+  await reg.deactivate('drv_1', 'v1');
+  assert.equal(await reg.getPrimary('drv_1'), null);
+  assert.deepEqual(await reg.listActive('drv_1'), []);
 });
 
 // --- registry: status, listing, isolation --------------------------------
 
-test('vehicles are isolated per driver', () => {
+test('vehicles are isolated per driver', async () => {
   const reg = createVehicleRegistry({ now });
-  reg.add('drv_1', gasCar(), { id: 'v1' });
-  reg.add('drv_2', evCar(), { id: 'v1' }); // same id, different driver
-  assert.equal(reg.list('drv_1').length, 1);
-  assert.equal(reg.list('drv_2').length, 1);
-  assert.equal(reg.getPrimary('drv_1').fuel.id, 'gasoline');
-  assert.equal(reg.getPrimary('drv_2').fuel.id, 'battery_electric');
-  assert.deepEqual(reg.list('unknown'), []);
+  await reg.add('drv_1', gasCar(), { id: 'v1' });
+  await reg.add('drv_2', evCar(), { id: 'v1' }); // same id, different driver
+  assert.equal((await reg.list('drv_1')).length, 1);
+  assert.equal((await reg.list('drv_2')).length, 1);
+  assert.equal((await reg.getPrimary('drv_1')).fuel.id, 'gasoline');
+  assert.equal((await reg.getPrimary('drv_2')).fuel.id, 'battery_electric');
+  assert.deepEqual(await reg.list('unknown'), []);
 });
 
-test('list can filter by status and fuel category', () => {
+test('list can filter by status and fuel category', async () => {
   const reg = createVehicleRegistry({ now });
-  reg.add('drv_1', gasCar(), { id: 'v1' });
-  reg.add('drv_1', evCar(), { id: 'v2' });
-  reg.retire('drv_1', 'v1');
-  assert.deepEqual(reg.list('drv_1', { status: 'retired' }).map((v) => v.id), ['v1']);
-  assert.deepEqual(reg.list('drv_1', { fuelCategory: 'electric' }).map((v) => v.id), ['v2']);
-  assert.throws(() => reg.list('drv_1', { status: 'scrapped' }), (e) => e.code === 'VEHICLE_STATUS');
+  await reg.add('drv_1', gasCar(), { id: 'v1' });
+  await reg.add('drv_1', evCar(), { id: 'v2' });
+  await reg.retire('drv_1', 'v1');
+  assert.deepEqual((await reg.list('drv_1', { status: 'retired' })).map((v) => v.id), ['v1']);
+  assert.deepEqual((await reg.list('drv_1', { fuelCategory: 'electric' })).map((v) => v.id), ['v2']);
+  await assert.rejects(() => reg.list('drv_1', { status: 'scrapped' }), (e) => e.code === 'VEHICLE_STATUS');
 });
 
-test('add rejects a duplicate active VIN but allows re-registering a retired one', () => {
+test('add rejects a duplicate active VIN but allows re-registering a retired one', async () => {
   const reg = createVehicleRegistry({ now });
-  reg.add('drv_1', gasCar(), { id: 'v1' });
-  assert.throws(() => reg.add('drv_1', gasCar({ make: 'Honda2' }), { id: 'v2' }), (e) => e.code === 'VEHICLE_DUPLICATE');
-  reg.retire('drv_1', 'v1');
-  const v3 = reg.add('drv_1', gasCar(), { id: 'v3' }); // same VIN, previous retired
+  await reg.add('drv_1', gasCar(), { id: 'v1' });
+  await assert.rejects(() => reg.add('drv_1', gasCar({ make: 'Honda2' }), { id: 'v2' }), (e) => e.code === 'VEHICLE_DUPLICATE');
+  await reg.retire('drv_1', 'v1');
+  const v3 = await reg.add('drv_1', gasCar(), { id: 'v3' }); // same VIN, previous retired
   assert.equal(v3.vin, HONDA);
 });
 
-test('add rejects a duplicate id and an unknown status', () => {
+test('add rejects a duplicate id and an unknown status', async () => {
   const reg = createVehicleRegistry({ now });
-  reg.add('drv_1', gasCar(), { id: 'v1' });
-  assert.throws(() => reg.add('drv_1', evCar(), { id: 'v1' }), (e) => e.code === 'VEHICLE_DUPLICATE');
-  assert.throws(() => reg.add('drv_1', evCar({ vin: BMW }), { status: 'wrecked' }), (e) => e.code === 'VEHICLE_STATUS');
+  await reg.add('drv_1', gasCar(), { id: 'v1' });
+  await assert.rejects(() => reg.add('drv_1', evCar(), { id: 'v1' }), (e) => e.code === 'VEHICLE_DUPLICATE');
+  await assert.rejects(() => reg.add('drv_1', evCar({ vin: BMW }), { status: 'wrecked' }), (e) => e.code === 'VEHICLE_STATUS');
 });
 
-test('a vehicle added inactive is not primary', () => {
+test('a vehicle added inactive is not primary', async () => {
   const reg = createVehicleRegistry({ now });
-  const v = reg.add('drv_1', gasCar(), { id: 'v1', status: 'inactive' });
+  const v = await reg.add('drv_1', gasCar(), { id: 'v1', status: 'inactive' });
   assert.equal(v.primary, false);
-  assert.equal(reg.getPrimary('drv_1'), null);
+  assert.equal(await reg.getPrimary('drv_1'), null);
 });
 
 // --- registry: update ----------------------------------------------------
 
-test('update merges a patch and re-validates the whole vehicle', () => {
+test('update merges a patch and re-validates the whole vehicle', async () => {
   const reg = createVehicleRegistry({ now });
-  reg.add('drv_1', gasCar(), { id: 'v1' });
-  const updated = reg.update('drv_1', 'v1', { nickname: 'Old Reliable', plate: 'xyz789' });
+  await reg.add('drv_1', gasCar(), { id: 'v1' });
+  const updated = await reg.update('drv_1', 'v1', { nickname: 'Old Reliable', plate: 'xyz789' });
   assert.equal(updated.nickname, 'Old Reliable');
   assert.equal(updated.displayName, 'Old Reliable');
   assert.deepEqual(updated.plate, { value: 'XYZ789', region: null });
   assert.equal(updated.fuel.id, 'gasoline'); // untouched fields preserved
 });
 
-test('update to a chargeable fuel type requires the EV fields in the same patch', () => {
+test('update to a chargeable fuel type requires the EV fields in the same patch', async () => {
   const reg = createVehicleRegistry({ now });
-  reg.add('drv_1', gasCar({ vin: PRIUS }), { id: 'v1' });
-  assert.throws(
+  await reg.add('drv_1', gasCar({ vin: PRIUS }), { id: 'v1' });
+  await assert.rejects(
     () => reg.update('drv_1', 'v1', { fuelType: 'battery_electric' }),
     (e) => e.code === 'VEHICLE_CONNECTOR',
   );
-  const ev = reg.update('drv_1', 'v1', { fuelType: 'battery_electric', batteryKwh: 50, connectorType: 'ccs1' });
+  const ev = await reg.update('drv_1', 'v1', { fuelType: 'battery_electric', batteryKwh: 50, connectorType: 'ccs1' });
   assert.equal(ev.fuel.id, 'battery_electric');
   assert.equal(ev.battery.capacityKwh, 50);
 
   // Switching back to combustion drops the battery record.
-  const back = reg.update('drv_1', 'v1', { fuelType: 'gasoline', batteryKwh: null, connectorType: null });
+  const back = await reg.update('drv_1', 'v1', { fuelType: 'gasoline', batteryKwh: null, connectorType: null });
   assert.equal(back.battery, null);
 });
 
-test('update rejects changing a VIN to one already registered', () => {
+test('update rejects changing a VIN to one already registered', async () => {
   const reg = createVehicleRegistry({ now });
-  reg.add('drv_1', gasCar(), { id: 'v1' });
-  reg.add('drv_1', evCar(), { id: 'v2' });
-  assert.throws(() => reg.update('drv_1', 'v2', { vin: HONDA }), (e) => e.code === 'VEHICLE_DUPLICATE');
+  await reg.add('drv_1', gasCar(), { id: 'v1' });
+  await reg.add('drv_1', evCar(), { id: 'v2' });
+  await assert.rejects(() => reg.update('drv_1', 'v2', { vin: HONDA }), (e) => e.code === 'VEHICLE_DUPLICATE');
 });
 
-test('get and update on a missing vehicle throw VEHICLE_NOT_FOUND', () => {
+test('get and update on a missing vehicle throw VEHICLE_NOT_FOUND', async () => {
   const reg = createVehicleRegistry({ now });
-  assert.throws(() => reg.get('drv_1', 'nope'), (e) => e.code === 'VEHICLE_NOT_FOUND');
-  assert.throws(() => reg.update('drv_1', 'nope', {}), (e) => e.code === 'VEHICLE_NOT_FOUND');
+  await assert.rejects(() => reg.get('drv_1', 'nope'), (e) => e.code === 'VEHICLE_NOT_FOUND');
+  await assert.rejects(() => reg.update('drv_1', 'nope', {}), (e) => e.code === 'VEHICLE_NOT_FOUND');
 });
 
-test('registry surfaces stored records as frozen snapshots', () => {
+test('registry surfaces stored records as frozen snapshots', async () => {
   const reg = createVehicleRegistry({ now });
-  const v = reg.add('drv_1', evCar(), { id: 'v1' });
+  const v = await reg.add('drv_1', evCar(), { id: 'v1' });
   assert.ok(Object.isFrozen(v));
   assert.ok(Object.isFrozen(v.battery));
   assert.throws(() => { v.status = 'retired'; }, TypeError);
   // Mutating a snapshot does not affect the store.
-  assert.equal(reg.get('drv_1', 'v1').status, 'active');
+  assert.equal((await reg.get('drv_1', 'v1')).status, 'active');
 });
 
 // --- config --------------------------------------------------------------
@@ -310,7 +310,7 @@ test('createVehicleRegistry validates its catalogue config', () => {
   assert.ok(EV_CONNECTOR_TYPES.length > 0);
 });
 
-test('add requires a driverId', () => {
+test('add requires a driverId', async () => {
   const reg = createVehicleRegistry({ now });
-  assert.throws(() => reg.add('', gasCar()), (e) => e.code === 'VEHICLE_DRIVER');
+  await assert.rejects(() => reg.add('', gasCar()), (e) => e.code === 'VEHICLE_DRIVER');
 });

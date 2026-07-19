@@ -90,11 +90,11 @@ export function createPayoutReconciliationWidget(config = {}) {
    * @param {string} driverId
    * @param {string} linkId
    * @param {object} [options] Forwarded to {@link reconcileRoute}; `status` filters which synced routes are considered (see route-sync.js `listRoutes`).
-   * @returns {object} `{ driverId, linkId, partner, totalRoutes, evaluatedRoutes, mismatchCount, status, reconciliations }`.
+   * @returns {Promise<object>} `{ driverId, linkId, partner, totalRoutes, evaluatedRoutes, mismatchCount, status, reconciliations }`.
    */
-  function reconcileLink(driverId, linkId, options = {}) {
-    const link = connections.get(driverId, linkId);
-    const routes = routeSync.listRoutes(driverId, linkId, options.status ? { status: options.status } : {});
+  async function reconcileLink(driverId, linkId, options = {}) {
+    const link = await connections.get(driverId, linkId);
+    const routes = await routeSync.listRoutes(driverId, linkId, options.status ? { status: options.status } : {});
     const reconciliations = routes.map((route) => reconcileRoute(route, link.payoutRate, options));
     const evaluated = reconciliations.filter((r) => r.status !== 'pending');
     const mismatches = evaluated.filter((r) => r.mismatched);
@@ -115,10 +115,11 @@ export function createPayoutReconciliationWidget(config = {}) {
    * Reconcile every active DSP link for a driver.
    * @param {string} driverId
    * @param {object} [options] Forwarded to {@link reconcileLink}.
-   * @returns {object[]} One reconciliation summary per active link.
+   * @returns {Promise<object[]>} One reconciliation summary per active link.
    */
-  function reconcileDriver(driverId, options = {}) {
-    return connections.listActive(driverId).map((link) => reconcileLink(driverId, link.id, options));
+  async function reconcileDriver(driverId, options = {}) {
+    const links = await connections.listActive(driverId);
+    return Promise.all(links.map((link) => reconcileLink(driverId, link.id, options)));
   }
 
   return { reconcileLink, reconcileDriver };

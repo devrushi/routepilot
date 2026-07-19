@@ -209,6 +209,144 @@ function routeCursor(route) {
 }
 
 /**
+ * In-memory route-sync repo (default) — same nested shape this module
+ * always used internally (`driverId -> linkId -> { cursor, lastRunAt,
+ * lastError, routes }`), just behind an async interface.
+ */
+export function createInMemoryRouteSyncRepo() {
+  const byDriver = new Map(); // driverId -> Map(linkId -> { cursor, lastRunAt, lastError, routes: Map(routeId -> route) })
+
+  function linkBucket(driverId, linkId) {
+    let links = byDriver.get(driverId);
+    if (!links) {
+      links = new Map();
+      byDriver.set(driverId, links);
+    }
+    let bucket = links.get(linkId);
+    if (!bucket) {
+      bucket = { cursor: null, lastRunAt: null, lastError: null, routes: new Map() };
+      links.set(linkId, bucket);
+    }
+    return bucket;
+  }
+
+  return {
+    async getLinkState(driverId, linkId) {
+      const links = byDriver.get(driverId);
+      const bucket = links && links.get(linkId);
+      if (!bucket) return null;
+      return { cursor: bucket.cursor, lastRunAt: bucket.lastRunAt, lastError: bucket.lastError };
+    },
+    async saveLinkState(driverId, linkId, state) {
+      const bucket = linkBucket(driverId, linkId);
+      bucket.cursor = state.cursor;
+      bucket.lastRunAt = state.lastRunAt;
+      bucket.lastError = state.lastError;
+    },
+    async listRouteIds(driverId, linkId) {
+      const links = byDriver.get(driverId);
+      const bucket = links && links.get(linkId);
+      return bucket ? new Set(bucket.routes.keys()) : new Set();
+    },
+    async upsertRoute(driverId, linkId, route) {
+      linkBucket(driverId, linkId).routes.set(route.id, structuredClone(route));
+    },
+    async countRoutes(driverId, linkId) {
+      const links = byDriver.get(driverId);
+      const bucket = links && links.get(linkId);
+      return bucket ? bucket.routes.size : 0;
+    },
+    async listRoutes(driverId, linkId) {
+      const links = byDriver.get(driverId);
+      const bucket = links && links.get(linkId);
+      return bucket ? [...bucket.routes.values()].map((r) => structuredClone(r)) : [];
+    },
+  };
+}
+
+function parseJsonColumn(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+/**
+ * Postgres-backed route-sync repo. Expects `route_sync_state` (one row per
+ * driver+link) and `synced_routes` (one row per driver+link+route) tables
+ * (see db/migrations).
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresRouteSyncRepo(sql) {
+  function stateFromRow(row) {
+    return {
+      cursor: row.cursor === null ? null : Number(row.cursor),
+      lastRunAt: row.last_run_at === null ? null : Number(row.last_run_at),
+      lastError: row.last_error,
+    };
+  }
+  function routeFromRow(row) {
+    return {
+      id: row.route_id,
+      driverId: row.driver_id,
+      linkId: row.link_id,
+      partner: row.partner,
+      status: row.status,
+      statusDescription: row.status_description,
+      startedAt: row.started_at === null ? null : Number(row.started_at),
+      completedAt: row.completed_at === null ? null : Number(row.completed_at),
+      work: parseJsonColumn(row.work, {}),
+      earnings: row.earnings === null ? null : Number(row.earnings),
+      currency: row.currency,
+      raw: parseJsonColumn(row.raw, null),
+      syncedAt: Number(row.synced_at),
+    };
+  }
+
+  return {
+    async getLinkState(driverId, linkId) {
+      const rows = await sql`SELECT * FROM route_sync_state WHERE driver_id = ${driverId} AND link_id = ${linkId} LIMIT 1`;
+      return rows[0] ? stateFromRow(rows[0]) : null;
+    },
+    async saveLinkState(driverId, linkId, state) {
+      await sql`
+        INSERT INTO route_sync_state (driver_id, link_id, cursor, last_run_at, last_error)
+        VALUES (${driverId}, ${linkId}, ${state.cursor}, ${state.lastRunAt}, ${state.lastError})
+        ON CONFLICT (driver_id, link_id) DO UPDATE SET
+          cursor = EXCLUDED.cursor, last_run_at = EXCLUDED.last_run_at, last_error = EXCLUDED.last_error
+      `;
+    },
+    async listRouteIds(driverId, linkId) {
+      const rows = await sql`SELECT route_id FROM synced_routes WHERE driver_id = ${driverId} AND link_id = ${linkId}`;
+      return new Set(rows.map((r) => r.route_id));
+    },
+    async upsertRoute(driverId, linkId, route) {
+      await sql`
+        INSERT INTO synced_routes (
+          driver_id, link_id, route_id, partner, status, status_description,
+          started_at, completed_at, work, earnings, currency, raw, synced_at
+        )
+        VALUES (
+          ${driverId}, ${linkId}, ${route.id}, ${route.partner}, ${route.status}, ${route.statusDescription},
+          ${route.startedAt}, ${route.completedAt}, ${JSON.stringify(route.work)}::jsonb,
+          ${route.earnings}, ${route.currency}, ${JSON.stringify(route.raw)}::jsonb, ${route.syncedAt}
+        )
+        ON CONFLICT (driver_id, link_id, route_id) DO UPDATE SET
+          partner = EXCLUDED.partner, status = EXCLUDED.status, status_description = EXCLUDED.status_description,
+          started_at = EXCLUDED.started_at, completed_at = EXCLUDED.completed_at, work = EXCLUDED.work,
+          earnings = EXCLUDED.earnings, currency = EXCLUDED.currency, raw = EXCLUDED.raw, synced_at = EXCLUDED.synced_at
+      `;
+    },
+    async countRoutes(driverId, linkId) {
+      const rows = await sql`SELECT COUNT(*)::int AS count FROM synced_routes WHERE driver_id = ${driverId} AND link_id = ${linkId}`;
+      return rows[0]?.count ?? 0;
+    },
+    async listRoutes(driverId, linkId) {
+      const rows = await sql`SELECT * FROM synced_routes WHERE driver_id = ${driverId} AND link_id = ${linkId}`;
+      return rows.map(routeFromRow);
+    },
+  };
+}
+
+/**
  * Create the route-history sync worker.
  *
  * The worker pulls each active DSP link's route history from its partner portal
@@ -223,11 +361,12 @@ function routeCursor(route) {
  *   empty); any thrown error surfaces as `ROUTE_SYNC_PORTAL`.
  * @param {object} [config.connections] A DSP connection manager (dsp.js). When
  *   given, the worker discovers drivers and their active links from it.
- * @param {(driverId: string) => Array} [config.listActiveLinks] Override for how
+ * @param {(driverId: string) => (Array|Promise<Array>)} [config.listActiveLinks] Override for how
  *   a driver's syncable links are listed (defaults to `connections.listActive`).
- * @param {() => Array<string>} [config.listDriverIds] Override for how driver
- *   ids are discovered (defaults to the keys of `connections.store`).
- * @param {Map} [config.store] Route store (per-driver → per-link state); in-memory by default.
+ * @param {() => (Array<string>|Promise<Array<string>>)} [config.listDriverIds] Override for how driver
+ *   ids are discovered (defaults to `connections.listDriverIds`).
+ * @param {{getLinkState:Function, saveLinkState:Function, listRouteIds:Function, upsertRoute:Function, countRoutes:Function, listRoutes:Function}} [config.repo]
+ *   Route-sync repo (defaults to an in-memory one).
  * @param {number} [config.intervalMs] Default sweep interval for {@link start}.
  * @param {(fn: Function, ms: number) => *} [config.setInterval] Scheduler (defaults to global setInterval).
  * @param {(handle: *) => void} [config.clearInterval] Descheduler (defaults to global clearInterval).
@@ -239,7 +378,7 @@ export function createRouteHistorySyncWorker(config = {}) {
   const {
     portal,
     connections,
-    store = new Map(),
+    repo = createInMemoryRouteSyncRepo(),
     intervalMs: defaultIntervalMs,
     onRun,
     onError,
@@ -255,7 +394,7 @@ export function createRouteHistorySyncWorker(config = {}) {
   }
 
   const listDriverIds = config.listDriverIds
-    ?? (connections ? () => [...connections.store.keys()] : null);
+    ?? (connections ? () => connections.listDriverIds() : null);
   const listActiveLinks = config.listActiveLinks
     ?? (connections ? (driverId) => connections.listActive(driverId) : null);
 
@@ -267,37 +406,6 @@ export function createRouteHistorySyncWorker(config = {}) {
   }
 
   let timer = null;
-
-  function driverBucket(driverId) {
-    let bucket = store.get(driverId);
-    if (!bucket) {
-      bucket = new Map();
-      store.set(driverId, bucket);
-    }
-    return bucket;
-  }
-
-  function linkState(driverId, linkId) {
-    const bucket = driverBucket(driverId);
-    let state = bucket.get(linkId);
-    if (!state) {
-      state = { cursor: null, lastRunAt: null, lastError: null, routes: new Map() };
-      bucket.set(linkId, state);
-    }
-    return state;
-  }
-
-  function requireLinkState(driverId, linkId) {
-    const bucket = store.get(driverId);
-    const state = bucket && bucket.get(linkId);
-    if (!state) {
-      throw new RouteSyncError(
-        `No sync state for link "${linkId}" of driver "${driverId}"`,
-        'ROUTE_SYNC_NOT_FOUND',
-      );
-    }
-    return state;
-  }
 
   /**
    * Sync a single link's route history from its partner portal.
@@ -318,10 +426,10 @@ export function createRouteHistorySyncWorker(config = {}) {
       throw new RouteSyncError('A link partner is required', 'ROUTE_SYNC_LINK');
     }
 
-    const state = linkState(driverId, link.id);
+    const priorState = (await repo.getLinkState(driverId, link.id)) ?? { cursor: null, lastRunAt: null, lastError: null };
     const since = options.since !== undefined
       ? options.since
-      : (options.full ? null : state.cursor);
+      : (options.full ? null : priorState.cursor);
 
     let rawList;
     try {
@@ -333,26 +441,25 @@ export function createRouteHistorySyncWorker(config = {}) {
         since,
       });
     } catch (err) {
-      state.lastError = err && err.message ? err.message : String(err);
-      throw new RouteSyncError(
-        `Route sync failed for ${partner}: ${state.lastError}`,
-        'ROUTE_SYNC_PORTAL',
-      );
+      const message = err && err.message ? err.message : String(err);
+      await repo.saveLinkState(driverId, link.id, { ...priorState, lastError: message });
+      throw new RouteSyncError(`Route sync failed for ${partner}: ${message}`, 'ROUTE_SYNC_PORTAL');
     }
 
     if (rawList === null || rawList === undefined) rawList = [];
     if (!Array.isArray(rawList)) {
-      state.lastError = 'portal did not return an array of routes';
+      await repo.saveLinkState(driverId, link.id, { ...priorState, lastError: 'portal did not return an array of routes' });
       throw new RouteSyncError(
         `Route portal for ${partner} must return an array of routes`,
         'ROUTE_SYNC_PORTAL',
       );
     }
 
+    const existingIds = await repo.listRouteIds(driverId, link.id);
     let added = 0;
     let updated = 0;
     let skipped = 0;
-    let cursor = state.cursor;
+    let cursor = priorState.cursor;
     const syncedAt = now();
 
     for (const raw of rawList) {
@@ -363,17 +470,17 @@ export function createRouteHistorySyncWorker(config = {}) {
         skipped += 1; // a single malformed record must not abort the sweep
         continue;
       }
-      const existed = state.routes.has(route.id);
-      state.routes.set(route.id, { ...route, driverId, linkId: link.id, syncedAt });
+      const existed = existingIds.has(route.id);
+      await repo.upsertRoute(driverId, link.id, { ...route, driverId, linkId: link.id, syncedAt });
+      existingIds.add(route.id);
       if (existed) updated += 1; else added += 1;
 
       const ts = routeCursor(route);
       if (ts !== null && (cursor === null || ts > cursor)) cursor = ts;
     }
 
-    state.cursor = cursor;
-    state.lastRunAt = syncedAt;
-    state.lastError = null;
+    await repo.saveLinkState(driverId, link.id, { cursor, lastRunAt: syncedAt, lastError: null });
+    const total = await repo.countRoutes(driverId, link.id);
 
     return deepFreeze({
       driverId,
@@ -384,7 +491,7 @@ export function createRouteHistorySyncWorker(config = {}) {
       added,
       updated,
       skipped,
-      total: state.routes.size,
+      total,
       cursor,
       syncedAt,
     });
@@ -398,7 +505,7 @@ export function createRouteHistorySyncWorker(config = {}) {
    */
   async function syncDriver(driverId, options = {}) {
     if (!driverId) throw new RouteSyncError('A driverId is required', 'ROUTE_SYNC_DRIVER');
-    const links = listActiveLinks(driverId) ?? [];
+    const links = (await listActiveLinks(driverId)) ?? [];
     const results = [];
     const errors = [];
     for (const link of links) {
@@ -428,7 +535,7 @@ export function createRouteHistorySyncWorker(config = {}) {
    * @returns {Promise<object>} An aggregate report.
    */
   async function runOnce(options = {}) {
-    const driverIds = options.driverId ? [options.driverId] : listDriverIds();
+    const driverIds = options.driverId ? [options.driverId] : await listDriverIds();
     const runId = generateId();
     const startedAt = now();
 
@@ -509,13 +616,10 @@ export function createRouteHistorySyncWorker(config = {}) {
    * @param {string} linkId
    * @param {object} [filter]
    * @param {string} [filter.status] Only routes in this {@link ROUTE_STATUSES} status.
-   * @returns {object[]} Frozen route records.
+   * @returns {Promise<object[]>} Frozen route records.
    */
-  function listRoutes(driverId, linkId, filter = {}) {
-    const bucket = store.get(driverId);
-    const state = bucket && bucket.get(linkId);
-    if (!state) return [];
-    let routes = [...state.routes.values()];
+  async function listRoutes(driverId, linkId, filter = {}) {
+    let routes = await repo.listRoutes(driverId, linkId);
     if (filter.status !== undefined) {
       if (!ROUTE_STATUSES.includes(filter.status)) {
         throw new RouteSyncError(`Unknown route status: ${filter.status}`, 'ROUTE_SYNC_STATUS');
@@ -533,17 +637,24 @@ export function createRouteHistorySyncWorker(config = {}) {
 
   /**
    * The sync state (cursor / last run / last error / route count) for one link.
-   * @returns {object} A frozen snapshot.
+   * @returns {Promise<object>} A frozen snapshot.
    */
-  function getSyncState(driverId, linkId) {
-    const state = requireLinkState(driverId, linkId);
+  async function getSyncState(driverId, linkId) {
+    const state = await repo.getLinkState(driverId, linkId);
+    if (!state) {
+      throw new RouteSyncError(
+        `No sync state for link "${linkId}" of driver "${driverId}"`,
+        'ROUTE_SYNC_NOT_FOUND',
+      );
+    }
+    const routeCount = await repo.countRoutes(driverId, linkId);
     return deepFreeze({
       driverId,
       linkId,
       cursor: state.cursor,
       lastRunAt: state.lastRunAt,
       lastError: state.lastError,
-      routeCount: state.routes.size,
+      routeCount,
     });
   }
 
@@ -556,6 +667,6 @@ export function createRouteHistorySyncWorker(config = {}) {
     isRunning,
     listRoutes,
     getSyncState,
-    store,
+    repo,
   };
 }
