@@ -29,6 +29,7 @@ export {
 export {
   createAuthService,
   createInMemoryUserStore,
+  createPostgresUserRepo,
   AuthError,
 } from './auth.js';
 

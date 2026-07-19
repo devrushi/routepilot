@@ -9,7 +9,7 @@
 
 import { createServer as createHttpServer } from 'node:http';
 import { createSessionManager } from './session.js';
-import { createAuthService } from './auth.js';
+import { createAuthService, createPostgresUserRepo } from './auth.js';
 import { createShiftTracker, createPostgresShiftRepo } from './shifts.js';
 import { createFuelLogger, createPostgresFuelRepo } from './fuel.js';
 import { createReceiptProcessor, createPostgresReceiptRepo } from './receipts.js';
@@ -77,6 +77,7 @@ function resolveServices(config = {}) {
       sessionManager,
       challengeSecret: envSecret('AUTH_CHALLENGE_SECRET'),
       now,
+      userStore: db ? createPostgresUserRepo(db) : undefined,
     }),
     shiftTracker = createShiftTracker({ now, repo: db ? createPostgresShiftRepo(db) : undefined }),
     fuelLogger = createFuelLogger({ now, repo: db ? createPostgresFuelRepo(db) : undefined }),

@@ -50,6 +50,61 @@ export function createInMemoryUserStore() {
   };
 }
 
+function parseJsonColumn(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+/**
+ * Postgres-backed user repo. Expects a `users` table (see db/migrations)
+ * with `mfa`/`biometrics` as JSONB — both are always read/written whole via
+ * `save()`, same as every other record in this module. `username_lower` is
+ * a plain column (not a generated one) kept in sync in application code,
+ * matching how the in-memory store already does its own `.toLowerCase()` —
+ * queried directly for case-insensitive lookup/uniqueness rather than
+ * relying on Postgres generated-column magic.
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresUserRepo(sql) {
+  function fromRow(row) {
+    return {
+      id: row.id,
+      username: row.username,
+      passwordHash: row.password_hash,
+      mfa: parseJsonColumn(row.mfa, { enabled: false, secret: null, pendingSecret: null, recoveryCodes: [] }),
+      biometrics: parseJsonColumn(row.biometrics, { credentials: [] }),
+      createdAt: Number(row.created_at),
+    };
+  }
+
+  return {
+    async findById(id) {
+      const [row] = await sql`SELECT * FROM users WHERE id = ${id}`;
+      return row ? fromRow(row) : null;
+    },
+    async findByUsername(username) {
+      const [row] = await sql`SELECT * FROM users WHERE username_lower = ${username.toLowerCase()}`;
+      return row ? fromRow(row) : null;
+    },
+    async save(user) {
+      await sql`
+        INSERT INTO users (id, username, username_lower, password_hash, mfa, biometrics, created_at)
+        VALUES (
+          ${user.id}, ${user.username}, ${user.username.toLowerCase()}, ${user.passwordHash},
+          ${JSON.stringify(user.mfa)}::jsonb, ${JSON.stringify(user.biometrics)}::jsonb, ${user.createdAt}
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          username = EXCLUDED.username,
+          username_lower = EXCLUDED.username_lower,
+          password_hash = EXCLUDED.password_hash,
+          mfa = EXCLUDED.mfa,
+          biometrics = EXCLUDED.biometrics
+      `;
+      return user;
+    },
+  };
+}
+
 function hashRecoveryCode(code) {
   return createHash('sha256').update(code).digest('hex');
 }
