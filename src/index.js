@@ -199,6 +199,8 @@ export {
 export {
   detectCostAnomaly,
   createRouteCostTracker,
+  createInMemoryRouteCostRepo,
+  createPostgresRouteCostRepo,
   DEFAULT_ANOMALY_THRESHOLD,
   CostAnomalyError,
 } from './cost-anomaly.js';

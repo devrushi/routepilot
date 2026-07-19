@@ -34,36 +34,36 @@ test('detectCostAnomaly rejects invalid input', () => {
   assert.throws(() => detectCostAnomaly(50, ['x']), (e) => e.code === 'ANOMALY_HISTORY');
 });
 
-test('createRouteCostTracker records history and flags an outlier for a driver\'s route', () => {
+test('createRouteCostTracker records history and flags an outlier for a driver\'s route', async () => {
   const tracker = createRouteCostTracker();
   for (const cost of HISTORY) {
-    tracker.recordCost('drv_1', 'downtown-loop', cost);
+    await tracker.recordCost('drv_1', 'downtown-loop', cost);
   }
-  assert.deepEqual(tracker.history('drv_1', 'downtown-loop'), HISTORY);
+  assert.deepEqual(await tracker.history('drv_1', 'downtown-loop'), HISTORY);
 
-  const normal = tracker.checkCost('drv_1', 'downtown-loop', 51);
+  const normal = await tracker.checkCost('drv_1', 'downtown-loop', 51);
   assert.equal(normal.isAnomaly, false);
 
-  const outlier = tracker.checkCost('drv_1', 'downtown-loop', 200);
+  const outlier = await tracker.checkCost('drv_1', 'downtown-loop', 200);
   assert.equal(outlier.isAnomaly, true);
 });
 
-test('recordAndCheck evaluates against prior history, then appends the new cost', () => {
+test('recordAndCheck evaluates against prior history, then appends the new cost', async () => {
   const tracker = createRouteCostTracker();
   for (const cost of HISTORY) {
-    tracker.recordCost('drv_1', 'airport-run', cost);
+    await tracker.recordCost('drv_1', 'airport-run', cost);
   }
-  const result = tracker.recordAndCheck('drv_1', 'airport-run', 200);
+  const result = await tracker.recordAndCheck('drv_1', 'airport-run', 200);
   assert.equal(result.isAnomaly, true);
-  assert.equal(tracker.history('drv_1', 'airport-run').length, HISTORY.length + 1);
+  assert.equal((await tracker.history('drv_1', 'airport-run')).length, HISTORY.length + 1);
 });
 
-test('route history is isolated per driver and per route', () => {
+test('route history is isolated per driver and per route', async () => {
   const tracker = createRouteCostTracker();
-  tracker.recordCost('drv_1', 'route-a', 50);
-  tracker.recordCost('drv_2', 'route-a', 999);
-  tracker.recordCost('drv_1', 'route-b', 10);
-  assert.deepEqual(tracker.history('drv_1', 'route-a'), [50]);
-  assert.deepEqual(tracker.history('drv_2', 'route-a'), [999]);
-  assert.deepEqual(tracker.history('drv_1', 'route-b'), [10]);
+  await tracker.recordCost('drv_1', 'route-a', 50);
+  await tracker.recordCost('drv_2', 'route-a', 999);
+  await tracker.recordCost('drv_1', 'route-b', 10);
+  assert.deepEqual(await tracker.history('drv_1', 'route-a'), [50]);
+  assert.deepEqual(await tracker.history('drv_2', 'route-a'), [999]);
+  assert.deepEqual(await tracker.history('drv_1', 'route-b'), [10]);
 });

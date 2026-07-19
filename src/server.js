@@ -19,6 +19,7 @@ import { createDspConnectionManager, createPostgresDspLinkRepo } from './dsp.js'
 import { createRouteHistorySyncWorker, createPostgresRouteSyncRepo } from './route-sync.js';
 import { createVehicleRegistry, createPostgresVehicleRepo } from './vehicles.js';
 import { createProfileWizard, createPostgresOnboardingRepo } from './onboarding.js';
+import { createRouteCostTracker, createPostgresRouteCostRepo } from './cost-anomaly.js';
 import { createDbClient } from './db.js';
 import { createRouter } from './router.js';
 import { sendJson, handleError } from './http-utils.js';
@@ -34,6 +35,7 @@ import { registerDspRoutes } from './routes/dsp.js';
 import { registerRouteSyncRoutes } from './routes/route-sync.js';
 import { registerVehicleRoutes } from './routes/vehicles.js';
 import { registerOnboardingRoutes } from './routes/onboarding.js';
+import { registerCostAnomalyRoutes } from './routes/cost-anomaly.js';
 
 export const DEFAULT_PORT = 3000;
 
@@ -91,6 +93,7 @@ function resolveServices(config = {}) {
     }),
     vehicleRegistry = createVehicleRegistry({ now, repo: db ? createPostgresVehicleRepo(db) : undefined }),
     profileWizard = createProfileWizard({ now, repo: db ? createPostgresOnboardingRepo(db) : undefined }),
+    routeCostTracker = createRouteCostTracker({ repo: db ? createPostgresRouteCostRepo(db) : undefined }),
   } = config;
   return {
     now,
@@ -106,6 +109,7 @@ function resolveServices(config = {}) {
     routeSync,
     vehicleRegistry,
     profileWizard,
+    routeCostTracker,
   };
 }
 
@@ -123,6 +127,7 @@ function buildRouter(services) {
   registerRouteSyncRoutes(router, services);
   registerVehicleRoutes(router, services);
   registerOnboardingRoutes(router, services);
+  registerCostAnomalyRoutes(router, services);
   return router;
 }
 
@@ -169,6 +174,7 @@ export function createRequestHandler(config = {}) {
  * @param {ReturnType<import('./route-sync.js').createRouteHistorySyncWorker>} [config.routeSync]
  * @param {ReturnType<import('./vehicles.js').createVehicleRegistry>} [config.vehicleRegistry]
  * @param {ReturnType<import('./onboarding.js').createProfileWizard>} [config.profileWizard]
+ * @param {ReturnType<import('./cost-anomaly.js').createRouteCostTracker>} [config.routeCostTracker]
  * @returns {import('node:http').Server}
  */
 export function createServer(config = {}) {

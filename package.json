@@ -10,7 +10,7 @@
     "start": "node src/server.js",
     "test": "node --test test/*.test.js",
     "test:watch": "node --test --watch test/*.test.js",
-    "test:integration": "node --test test/integration/*.test.js",
+    "test:integration": "node --test --test-concurrency=1 test/integration/*.test.js",
     "migrate": "node scripts/migrate.js"
   },
   "license": "UNLICENSED",

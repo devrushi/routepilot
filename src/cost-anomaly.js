@@ -90,49 +90,83 @@ export function detectCostAnomaly(cost, historicalCosts, options = {}) {
   };
 }
 
+/** In-memory route-cost repo (default) — keyed by `driverId::routeKey`, async interface. */
+export function createInMemoryRouteCostRepo() {
+  const store = new Map();
+  return {
+    async listHistory(driverId, routeKey) {
+      return [...(store.get(`${driverId}::${routeKey}`) ?? [])];
+    },
+    async recordCost(driverId, routeKey, cost) {
+      const k = `${driverId}::${routeKey}`;
+      const list = store.get(k) ?? [];
+      list.push(cost);
+      store.set(k, list);
+    },
+  };
+}
+
+/**
+ * Postgres-backed route-cost repo. Expects a `route_cost_history` table
+ * (see db/migrations) — insert-only, one row per recorded cost.
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresRouteCostRepo(sql) {
+  return {
+    async listHistory(driverId, routeKey) {
+      const rows = await sql`
+        SELECT cost FROM route_cost_history WHERE driver_id = ${driverId} AND route_key = ${routeKey} ORDER BY id ASC
+      `;
+      return rows.map((r) => Number(r.cost));
+    },
+    async recordCost(driverId, routeKey, cost) {
+      await sql`INSERT INTO route_cost_history (driver_id, route_key, cost) VALUES (${driverId}, ${routeKey}, ${cost})`;
+    },
+  };
+}
+
 /**
  * Create a per-driver, per-route cost history tracker built on
  * {@link detectCostAnomaly}.
  * @param {object} [config]
- * @param {Map} [config.store] Backing store, keyed by `driverId::routeKey` (defaults in-memory).
+ * @param {{listHistory:Function, recordCost:Function}} [config.repo] Cost history repo (defaults to an in-memory one).
  * @param {number} [config.threshold=DEFAULT_ANOMALY_THRESHOLD]
  */
 export function createRouteCostTracker(config = {}) {
-  const { store = new Map(), threshold = DEFAULT_ANOMALY_THRESHOLD } = config;
+  const { repo = createInMemoryRouteCostRepo(), threshold = DEFAULT_ANOMALY_THRESHOLD } = config;
 
-  function key(driverId, routeKey) {
+  function requireKey(driverId, routeKey) {
     if (!driverId || !routeKey) {
       throw new CostAnomalyError('A driverId and routeKey are required', 'ANOMALY_ROUTE');
     }
-    return `${driverId}::${routeKey}`;
   }
 
   /** A driver's recorded cost history for a route, oldest first. */
-  function history(driverId, routeKey) {
-    return [...(store.get(key(driverId, routeKey)) ?? [])];
+  async function history(driverId, routeKey) {
+    requireKey(driverId, routeKey);
+    return repo.listHistory(driverId, routeKey);
   }
 
   /** Record a cost against a driver's route history. */
-  function recordCost(driverId, routeKey, cost) {
+  async function recordCost(driverId, routeKey, cost) {
+    requireKey(driverId, routeKey);
     validateCost(cost);
-    const k = key(driverId, routeKey);
-    const list = store.get(k) ?? [];
-    list.push(cost);
-    store.set(k, list);
-    return [...list];
+    await repo.recordCost(driverId, routeKey, cost);
+    return repo.listHistory(driverId, routeKey);
   }
 
   /** Check a cost against the driver's existing route history (not including this cost). */
-  function checkCost(driverId, routeKey, cost, options = {}) {
-    return detectCostAnomaly(cost, history(driverId, routeKey), { threshold, ...options });
+  async function checkCost(driverId, routeKey, cost, options = {}) {
+    const hist = await history(driverId, routeKey);
+    return detectCostAnomaly(cost, hist, { threshold, ...options });
   }
 
   /** Check a cost against history, then record it so future checks include it. */
-  function recordAndCheck(driverId, routeKey, cost, options = {}) {
-    const result = checkCost(driverId, routeKey, cost, options);
-    recordCost(driverId, routeKey, cost);
+  async function recordAndCheck(driverId, routeKey, cost, options = {}) {
+    const result = await checkCost(driverId, routeKey, cost, options);
+    await recordCost(driverId, routeKey, cost);
     return result;
   }
 
-  return { recordCost, checkCost, recordAndCheck, history, store };
+  return { recordCost, checkCost, recordAndCheck, history, repo };
 }
