@@ -127,7 +127,7 @@ export function createNotificationScheduler(config = {}) {
     }
 
     if (purchases.length > 0) {
-      const receipts = receiptProcessor ? receiptProcessor.list(driverId) : [];
+      const receipts = receiptProcessor ? await receiptProcessor.list(driverId) : [];
       for (const purchase of purchases) {
         const result = await checkReceiptOverdue(driverId, purchase, receipts);
         if (result) results.push(result);

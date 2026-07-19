@@ -13,6 +13,10 @@
 // authority's actual expense categories for a sole-trader/self-employed
 // driver — not tax advice, and not a substitute for the real Schedule C /
 // SA103 line items a filing would ultimately use.
+//
+// Expense records are flat (no nested arrays/objects), so — unlike
+// shifts.js/fuel.js — the Postgres repo uses plain columns throughout, no
+// JSONB. Insert-only, like fuel.js: no `update`.
 
 import { randomUUID } from 'node:crypto';
 import { TAX_JURISDICTIONS } from './tax-residency.js';
@@ -156,31 +160,97 @@ export function bucketFor(categoryId, authority) {
   throw new ExpenseError(`Unknown tax authority: ${authority}`, 'EXPENSE_AUTHORITY');
 }
 
+/** In-memory expense repo (default) — nested Map-backed, async interface. */
+export function createInMemoryExpenseRepo() {
+  const byDriver = new Map(); // driverId -> Map(id -> record)
+
+  function driverExpenses(driverId) {
+    let expenses = byDriver.get(driverId);
+    if (!expenses) {
+      expenses = new Map();
+      byDriver.set(driverId, expenses);
+    }
+    return expenses;
+  }
+
+  return {
+    async insert(record) {
+      driverExpenses(record.driverId).set(record.id, structuredClone(record));
+    },
+    async findById(driverId, id) {
+      const expenses = byDriver.get(driverId);
+      const record = expenses && expenses.get(id);
+      return record ? structuredClone(record) : null;
+    },
+    async listByDriver(driverId, filter = {}) {
+      const expenses = byDriver.get(driverId);
+      if (!expenses) return [];
+      let records = [...expenses.values()].sort((a, b) => a.at - b.at);
+      if (filter.category !== undefined) {
+        records = records.filter((r) => r.category === filter.category);
+      }
+      return records.map((r) => structuredClone(r));
+    },
+  };
+}
+
+/**
+ * Postgres-backed expense repo. Expects an `expenses` table (see
+ * db/migrations) — plain columns throughout, since the record has no
+ * nested arrays/objects.
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresExpenseRepo(sql) {
+  function fromRow(row) {
+    return {
+      id: row.id,
+      driverId: row.driver_id,
+      category: row.category,
+      categoryLabel: row.category_label,
+      authority: row.authority,
+      bucket: row.bucket,
+      amount: Number(row.amount),
+      currency: row.currency,
+      at: Number(row.at),
+    };
+  }
+
+  return {
+    async insert(record) {
+      await sql`
+        INSERT INTO expenses (id, driver_id, category, category_label, authority, bucket, amount, currency, at)
+        VALUES (
+          ${record.id}, ${record.driverId}, ${record.category}, ${record.categoryLabel},
+          ${record.authority}, ${record.bucket}, ${record.amount}, ${record.currency}, ${record.at}
+        )
+      `;
+    },
+    async findById(driverId, id) {
+      const rows = await sql`SELECT * FROM expenses WHERE driver_id = ${driverId} AND id = ${id} LIMIT 1`;
+      return rows[0] ? fromRow(rows[0]) : null;
+    },
+    async listByDriver(driverId, filter = {}) {
+      const rows = filter.category !== undefined
+        ? await sql`SELECT * FROM expenses WHERE driver_id = ${driverId} AND category = ${filter.category} ORDER BY at ASC`
+        : await sql`SELECT * FROM expenses WHERE driver_id = ${driverId} ORDER BY at ASC`;
+      return rows.map(fromRow);
+    },
+  };
+}
+
 /**
  * Create the expense categorization tracker.
  * @param {object} [config]
- * @param {Map} [config.store] Per-driver expense store (defaults in-memory).
+ * @param {{insert:Function, findById:Function, listByDriver:Function}} [config.repo] Expense repo (defaults to an in-memory one).
  * @param {() => number} [config.now] Clock in ms (injectable for tests).
  * @param {() => string} [config.generateId] Record id generator.
  */
 export function createExpenseTracker(config = {}) {
   const {
-    store = new Map(),
+    repo = createInMemoryExpenseRepo(),
     now = () => Date.now(),
     generateId = () => `exp_${randomUUID()}`,
   } = config;
-
-  function requireDriverExpenses(driverId) {
-    if (!driverId) {
-      throw new ExpenseError('A driverId is required', 'EXPENSE_DRIVER');
-    }
-    let expenses = store.get(driverId);
-    if (!expenses) {
-      expenses = new Map();
-      store.set(driverId, expenses);
-    }
-    return expenses;
-  }
 
   function snapshot(record) {
     return deepFreeze(structuredClone(record));
@@ -196,10 +266,12 @@ export function createExpenseTracker(config = {}) {
    * @param {string} input.currency ISO 4217 code.
    * @param {object|string} input.jurisdiction Driver's tax residency (see {@link resolveAuthority}).
    * @param {number} [input.at] Timestamp override (ms since epoch).
-   * @returns {object} The stored, frozen expense record.
+   * @returns {Promise<object>} The stored, frozen expense record.
    */
-  function categorize(driverId, input = {}) {
-    const expenses = requireDriverExpenses(driverId);
+  async function categorize(driverId, input = {}) {
+    if (!driverId) {
+      throw new ExpenseError('A driverId is required', 'EXPENSE_DRIVER');
+    }
     const category = resolveCategory(input.category);
     if (!category) {
       const accepted = EXPENSE_CATEGORIES.map((c) => c.id).join(', ');
@@ -220,14 +292,13 @@ export function createExpenseTracker(config = {}) {
       currency,
       at: input.at ?? now(),
     };
-    expenses.set(record.id, record);
+    await repo.insert(record);
     return snapshot(record);
   }
 
   /** Get one expense, or `null`. */
-  function get(driverId, id) {
-    const expenses = store.get(driverId);
-    const record = expenses && expenses.get(id);
+  async function get(driverId, id) {
+    const record = await repo.findById(driverId, id);
     return record ? snapshot(record) : null;
   }
 
@@ -237,15 +308,10 @@ export function createExpenseTracker(config = {}) {
    * @param {object} [filter]
    * @param {string} [filter.category]
    */
-  function list(driverId, filter = {}) {
-    const expenses = store.get(driverId);
-    if (!expenses) return [];
-    let records = [...expenses.values()].sort((a, b) => a.at - b.at);
-    if (filter.category !== undefined) {
-      records = records.filter((r) => r.category === filter.category);
-    }
+  async function list(driverId, filter = {}) {
+    const records = await repo.listByDriver(driverId, filter);
     return records.map(snapshot);
   }
 
-  return { categorize, get, list, store };
+  return { categorize, get, list, repo };
 }

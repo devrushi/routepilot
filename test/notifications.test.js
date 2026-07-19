@@ -92,7 +92,7 @@ test('sweepDriver does not send a late-receipt notification when a receipt was q
   const windowMs = 48 * 60 * 60 * 1000;
   const purchaseAt = 1_700_000_000_000;
   const receiptProcessor = createReceiptProcessor({ now: () => purchaseAt + 1000 });
-  receiptProcessor.queue('drv_1', { path: '/r1.jpg' });
+  await receiptProcessor.queue('drv_1', { path: '/r1.jpg' });
 
   const pushProvider = createMockPushProvider();
   const scheduler = createNotificationScheduler({

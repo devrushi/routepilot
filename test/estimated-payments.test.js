@@ -41,40 +41,40 @@ test('nextDueDate supports the HMRC payment-on-account schedule', () => {
   assert.equal(result.dueDate, '2024-07-31T00:00:00.000Z');
 });
 
-test('recordPayment stores a payment and it can be retrieved for its quarter', () => {
+test('recordPayment stores a payment and it can be retrieved for its quarter', async () => {
   const nowRef = { value: 1_700_000_000_000 };
   const tracker = createEstimatedPaymentTracker({ now: () => nowRef.value });
-  const payment = tracker.recordPayment('drv_1', { taxYear: 2024, quarter: 'Q2', amount: 1500, currency: 'usd' });
+  const payment = await tracker.recordPayment('drv_1', { taxYear: 2024, quarter: 'Q2', amount: 1500, currency: 'usd' });
   assert.equal(payment.taxYear, 2024);
   assert.equal(payment.quarter, 'Q2');
   assert.equal(payment.currency, 'USD');
   assert.equal(payment.paidAt, nowRef.value);
 
-  const forQuarter = tracker.listPayments('drv_1', { taxYear: 2024, quarter: 'Q2' });
+  const forQuarter = await tracker.listPayments('drv_1', { taxYear: 2024, quarter: 'Q2' });
   assert.equal(forQuarter.length, 1);
   assert.equal(forQuarter[0].id, payment.id);
 });
 
-test('totalPaid sums multiple (partial) payments against the same quarter', () => {
+test('totalPaid sums multiple (partial) payments against the same quarter', async () => {
   const nowRef = { value: 1_700_000_000_000 };
   const tracker = createEstimatedPaymentTracker({ now: () => nowRef.value });
-  tracker.recordPayment('drv_1', { taxYear: 2024, quarter: 'Q3', amount: 600, currency: 'USD' });
+  await tracker.recordPayment('drv_1', { taxYear: 2024, quarter: 'Q3', amount: 600, currency: 'USD' });
   nowRef.value += 1000;
-  tracker.recordPayment('drv_1', { taxYear: 2024, quarter: 'Q3', amount: 400, currency: 'USD' });
-  tracker.recordPayment('drv_1', { taxYear: 2024, quarter: 'Q4', amount: 900, currency: 'USD' });
+  await tracker.recordPayment('drv_1', { taxYear: 2024, quarter: 'Q3', amount: 400, currency: 'USD' });
+  await tracker.recordPayment('drv_1', { taxYear: 2024, quarter: 'Q4', amount: 900, currency: 'USD' });
 
-  assert.equal(tracker.totalPaid('drv_1', 2024, 'Q3'), 1000);
-  assert.equal(tracker.totalPaid('drv_1', 2024, 'Q4'), 900);
+  assert.equal(await tracker.totalPaid('drv_1', 2024, 'Q3'), 1000);
+  assert.equal(await tracker.totalPaid('drv_1', 2024, 'Q4'), 900);
 });
 
-test('recordPayment rejects invalid input', () => {
+test('recordPayment rejects invalid input', async () => {
   const nowRef = { value: 1_700_000_000_000 };
   const tracker = createEstimatedPaymentTracker({ now: () => nowRef.value });
-  assert.throws(
+  await assert.rejects(
     () => tracker.recordPayment('drv_1', { taxYear: 2024, quarter: '', amount: 100, currency: 'USD' }),
     (e) => e.code === 'PAYMENT_QUARTER',
   );
-  assert.throws(
+  await assert.rejects(
     () => tracker.recordPayment('drv_1', { taxYear: 2024, quarter: 'Q1', amount: -5, currency: 'USD' }),
     (e) => e.code === 'PAYMENT_AMOUNT',
   );

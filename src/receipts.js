@@ -12,6 +12,21 @@
 // returning canned/injectable responses. Swap it for a real provider by
 // passing a different `ocrProvider` to `createReceiptProcessor` — the queue
 // and extraction logic here doesn't change.
+//
+// Storage is a `repo` — no separate `pending` FIFO array; "queued" is just a
+// status, and `repo.claimNextQueued()` atomically finds-and-flips the oldest
+// queued receipt (across all drivers) to `processing` in one step, so two
+// concurrent claims can never grab the same receipt. The Postgres repo does
+// this with `SELECT ... FOR UPDATE SKIP LOCKED` in a single statement; the
+// in-memory repo just mutates synchronously (no concurrency to race against
+// in one JS thread). Every other repo method follows the established
+// copy-on-read rule (session.js/shifts.js/fuel.js) — `claimNextQueued` is
+// the one deliberate exception, since atomically claiming *is* its job.
+//
+// Uploaded file bytes (`upload.buffer`) are never persisted to Postgres —
+// only `path`/`mimeType` are. A real deployment should upload the file to
+// blob storage first and queue with that `path`; `buffer` only round-trips
+// through the in-memory repo (fine for tests/local dev).
 
 import { randomUUID } from 'node:crypto';
 
@@ -94,35 +109,150 @@ function deepFreeze(obj) {
   return obj;
 }
 
+/** In-memory receipt repo (default) — nested Map-backed, async interface. */
+export function createInMemoryReceiptRepo() {
+  const byDriver = new Map(); // driverId -> Map(id -> record)
+
+  function driverReceipts(driverId) {
+    let receipts = byDriver.get(driverId);
+    if (!receipts) {
+      receipts = new Map();
+      byDriver.set(driverId, receipts);
+    }
+    return receipts;
+  }
+
+  return {
+    async insert(record) {
+      driverReceipts(record.driverId).set(record.id, structuredClone(record));
+    },
+    async findById(driverId, id) {
+      const receipts = byDriver.get(driverId);
+      const record = receipts && receipts.get(id);
+      return record ? structuredClone(record) : null;
+    },
+    async update(record) {
+      driverReceipts(record.driverId).set(record.id, structuredClone(record));
+    },
+    async listByDriver(driverId, filter = {}) {
+      const receipts = byDriver.get(driverId);
+      if (!receipts) return [];
+      let records = [...receipts.values()].sort((a, b) => a.queuedAt - b.queuedAt);
+      if (filter.status !== undefined) {
+        records = records.filter((r) => r.status === filter.status);
+      }
+      return records.map((r) => structuredClone(r));
+    },
+    // Atomically claims (flips to 'processing') the oldest queued receipt
+    // across all drivers. Mutates the canonical stored record directly
+    // (single JS thread, no interleaving possible between the find and the
+    // flip) then returns a copy — the one method here that isn't a plain
+    // read, by design, matching the Postgres repo's claim semantics.
+    async claimNextQueued() {
+      let oldest = null;
+      for (const receipts of byDriver.values()) {
+        for (const record of receipts.values()) {
+          if (record.status === 'queued' && (!oldest || record.queuedAt < oldest.queuedAt)) {
+            oldest = record;
+          }
+        }
+      }
+      if (!oldest) return null;
+      oldest.status = 'processing';
+      return structuredClone(oldest);
+    },
+  };
+}
+
+function parseJsonColumn(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+/**
+ * Postgres-backed receipt repo. Expects a `receipts` table (see
+ * db/migrations). `claimNextQueued` uses `FOR UPDATE SKIP LOCKED` in a
+ * single CTE + UPDATE statement so concurrent workers never claim the same
+ * row.
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresReceiptRepo(sql) {
+  function fromRow(row) {
+    return {
+      id: row.id,
+      driverId: row.driver_id,
+      status: row.status,
+      upload: parseJsonColumn(row.upload, {}),
+      _buffer: null, // never persisted — see module header
+      queuedAt: Number(row.queued_at),
+      processedAt: row.processed_at === null ? null : Number(row.processed_at),
+      fields: parseJsonColumn(row.fields, null),
+      rawText: row.raw_text,
+      error: row.error,
+    };
+  }
+
+  return {
+    async insert(record) {
+      await sql`
+        INSERT INTO receipts (id, driver_id, status, upload, queued_at, processed_at, fields, raw_text, error)
+        VALUES (
+          ${record.id}, ${record.driverId}, ${record.status}, ${JSON.stringify(record.upload)}::jsonb,
+          ${record.queuedAt}, ${record.processedAt},
+          ${record.fields ? JSON.stringify(record.fields) : null}::jsonb, ${record.rawText}, ${record.error}
+        )
+      `;
+    },
+    async findById(driverId, id) {
+      const rows = await sql`SELECT * FROM receipts WHERE driver_id = ${driverId} AND id = ${id} LIMIT 1`;
+      return rows[0] ? fromRow(rows[0]) : null;
+    },
+    async update(record) {
+      await sql`
+        UPDATE receipts SET
+          status = ${record.status},
+          processed_at = ${record.processedAt},
+          fields = ${record.fields ? JSON.stringify(record.fields) : null}::jsonb,
+          raw_text = ${record.rawText},
+          error = ${record.error}
+        WHERE id = ${record.id}
+      `;
+    },
+    async listByDriver(driverId, filter = {}) {
+      const rows = filter.status !== undefined
+        ? await sql`SELECT * FROM receipts WHERE driver_id = ${driverId} AND status = ${filter.status} ORDER BY queued_at ASC`
+        : await sql`SELECT * FROM receipts WHERE driver_id = ${driverId} ORDER BY queued_at ASC`;
+      return rows.map(fromRow);
+    },
+    async claimNextQueued() {
+      const rows = await sql`
+        WITH next_receipt AS (
+          SELECT id FROM receipts WHERE status = 'queued' ORDER BY queued_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED
+        )
+        UPDATE receipts SET status = 'processing'
+        WHERE id = (SELECT id FROM next_receipt)
+        RETURNING *
+      `;
+      return rows[0] ? fromRow(rows[0]) : null;
+    },
+  };
+}
+
 /**
  * Create the receipt processing queue.
  * @param {object} [config]
- * @param {Map} [config.store] Per-driver receipt store (defaults in-memory).
- * @param {Array} [config.pending] Global FIFO of `{ driverId, id }` awaiting processing.
+ * @param {{insert:Function, findById:Function, update:Function, listByDriver:Function, claimNextQueued:Function}} [config.repo] Receipt repo (defaults to an in-memory one).
  * @param {{recognize: (input:object) => Promise<{text?:string, fields?:object}>}} [config.ocrProvider]
  * @param {() => number} [config.now] Clock in ms (injectable for tests).
  * @param {() => string} [config.generateId] Receipt id generator.
  */
 export function createReceiptProcessor(config = {}) {
   const {
-    store = new Map(),
-    pending = [],
+    repo = createInMemoryReceiptRepo(),
     ocrProvider = createMockOcrProvider(),
     now = () => Date.now(),
     generateId = () => `rcpt_${randomUUID()}`,
   } = config;
-
-  function requireDriverReceipts(driverId) {
-    if (!driverId) {
-      throw new ReceiptError('A driverId is required', 'RECEIPT_DRIVER');
-    }
-    let receipts = store.get(driverId);
-    if (!receipts) {
-      receipts = new Map();
-      store.set(driverId, receipts);
-    }
-    return receipts;
-  }
 
   function snapshot(record) {
     const { _buffer, ...rest } = record;
@@ -133,13 +263,15 @@ export function createReceiptProcessor(config = {}) {
    * Queue a receipt upload for OCR processing.
    * @param {string} driverId
    * @param {object} upload
-   * @param {Buffer} [upload.buffer] Raw file bytes.
+   * @param {Buffer} [upload.buffer] Raw file bytes (in-memory repo only — see module header).
    * @param {string} [upload.path] Path to the uploaded file.
    * @param {string} [upload.mimeType]
-   * @returns {object} The queued, frozen receipt record.
+   * @returns {Promise<object>} The queued, frozen receipt record.
    */
-  function queue(driverId, upload = {}) {
-    const receipts = requireDriverReceipts(driverId);
+  async function queue(driverId, upload = {}) {
+    if (!driverId) {
+      throw new ReceiptError('A driverId is required', 'RECEIPT_DRIVER');
+    }
     if (upload === null || typeof upload !== 'object') {
       throw new ReceiptError('An upload must be an object', 'RECEIPT_UPLOAD');
     }
@@ -162,29 +294,13 @@ export function createReceiptProcessor(config = {}) {
       rawText: null,
       error: null,
     };
-    receipts.set(record.id, record);
-    pending.push({ driverId, id: record.id });
+    await repo.insert(record);
     return snapshot(record);
   }
 
-  /**
-   * Process one queued receipt: run it through the OCR provider and extract
-   * fields. On provider failure the receipt is marked `failed` with the
-   * error message rather than throwing, so a queue sweep can continue past it.
-   * @returns {Promise<object>} The updated, frozen receipt record.
-   */
-  async function process(driverId, id) {
-    const receipts = store.get(driverId);
-    const record = receipts && receipts.get(id);
-    if (!record) {
-      throw new ReceiptError(`No receipt "${id}" for driver "${driverId}"`, 'RECEIPT_NOT_FOUND');
-    }
-    if (record.status !== 'queued') {
-      throw new ReceiptError(`Receipt "${id}" is not queued (status: ${record.status})`, 'RECEIPT_NOT_QUEUED');
-    }
-    const idx = pending.findIndex((p) => p.driverId === driverId && p.id === id);
-    if (idx !== -1) pending.splice(idx, 1);
-
+  // Runs the OCR call for an already-claimed (status: 'processing') record
+  // and persists the outcome. Shared by process() and processNext().
+  async function finishProcessing(record) {
     try {
       const result = await ocrProvider.recognize({
         buffer: record._buffer,
@@ -199,29 +315,50 @@ export function createReceiptProcessor(config = {}) {
       record.error = err instanceof Error ? err.message : String(err);
     }
     record.processedAt = now();
+    await repo.update(record);
     return snapshot(record);
+  }
+
+  /**
+   * Process one queued receipt: run it through the OCR provider and extract
+   * fields. On provider failure the receipt is marked `failed` with the
+   * error message rather than throwing, so a queue sweep can continue past it.
+   * @returns {Promise<object>} The updated, frozen receipt record.
+   */
+  async function process(driverId, id) {
+    const record = await repo.findById(driverId, id);
+    if (!record) {
+      throw new ReceiptError(`No receipt "${id}" for driver "${driverId}"`, 'RECEIPT_NOT_FOUND');
+    }
+    if (record.status !== 'queued') {
+      throw new ReceiptError(`Receipt "${id}" is not queued (status: ${record.status})`, 'RECEIPT_NOT_QUEUED');
+    }
+    record.status = 'processing';
+    await repo.update(record);
+    return finishProcessing(record);
   }
 
   /** Process the oldest queued receipt across all drivers (FIFO), or `null` if the queue is empty. */
   async function processNext() {
-    if (pending.length === 0) return null;
-    const { driverId, id } = pending[0];
-    return process(driverId, id);
+    const claimed = await repo.claimNextQueued();
+    if (!claimed) return null;
+    return finishProcessing(claimed);
   }
 
   /** Process every currently queued receipt (FIFO), returning their results in order. */
   async function processAll() {
     const results = [];
-    while (pending.length > 0) {
-      results.push(await processNext());
+    let result = await processNext();
+    while (result !== null) {
+      results.push(result);
+      result = await processNext();
     }
     return results;
   }
 
   /** Get one receipt, or `null`. */
-  function get(driverId, id) {
-    const receipts = store.get(driverId);
-    const record = receipts && receipts.get(id);
+  async function get(driverId, id) {
+    const record = await repo.findById(driverId, id);
     return record ? snapshot(record) : null;
   }
 
@@ -229,17 +366,12 @@ export function createReceiptProcessor(config = {}) {
    * List a driver's receipts, oldest first.
    * @param {string} driverId
    * @param {object} [filter]
-   * @param {'queued'|'processed'|'failed'} [filter.status]
+   * @param {'queued'|'processing'|'processed'|'failed'} [filter.status]
    */
-  function list(driverId, filter = {}) {
-    const receipts = store.get(driverId);
-    if (!receipts) return [];
-    let records = [...receipts.values()].sort((a, b) => a.queuedAt - b.queuedAt);
-    if (filter.status !== undefined) {
-      records = records.filter((r) => r.status === filter.status);
-    }
+  async function list(driverId, filter = {}) {
+    const records = await repo.listByDriver(driverId, filter);
     return records.map(snapshot);
   }
 
-  return { queue, process, processNext, processAll, get, list, store };
+  return { queue, process, processNext, processAll, get, list, repo };
 }

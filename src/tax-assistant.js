@@ -114,7 +114,7 @@ export function createTaxAssistant(config = {}) {
     if (typeof question !== 'string' || !question.trim()) {
       throw new TaxAssistantError('A question is required', 'ASSISTANT_QUESTION');
     }
-    const expenses = input.expenses ?? (expenseTracker && driverId ? expenseTracker.list(driverId) : []);
+    const expenses = input.expenses ?? (expenseTracker && driverId ? await expenseTracker.list(driverId) : []);
     const context = assembleContext({ expenses, jurisdiction });
     const messages = [
       { role: 'system', content: systemPrompt },

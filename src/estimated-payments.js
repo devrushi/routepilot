@@ -122,31 +122,99 @@ function deepFreeze(obj) {
   return obj;
 }
 
+/** In-memory payment repo (default) — nested Map-backed, async interface. */
+export function createInMemoryEstimatedPaymentRepo() {
+  const byDriver = new Map(); // driverId -> Map(id -> record)
+
+  function driverPayments(driverId) {
+    let payments = byDriver.get(driverId);
+    if (!payments) {
+      payments = new Map();
+      byDriver.set(driverId, payments);
+    }
+    return payments;
+  }
+
+  return {
+    async insert(record) {
+      driverPayments(record.driverId).set(record.id, structuredClone(record));
+    },
+    async listByDriver(driverId, filter = {}) {
+      const payments = byDriver.get(driverId);
+      if (!payments) return [];
+      let records = [...payments.values()].sort((a, b) => a.paidAt - b.paidAt);
+      if (filter.taxYear !== undefined) records = records.filter((r) => r.taxYear === filter.taxYear);
+      if (filter.quarter !== undefined) records = records.filter((r) => r.quarter === filter.quarter);
+      return records.map((r) => structuredClone(r));
+    },
+  };
+}
+
+/**
+ * Postgres-backed payment repo. Expects an `estimated_payments` table (see
+ * db/migrations) — plain columns throughout, no nested data.
+ * @param {import('@neondatabase/serverless').NeonQueryFunction<false,false>} sql
+ */
+export function createPostgresEstimatedPaymentRepo(sql) {
+  function fromRow(row) {
+    return {
+      id: row.id,
+      driverId: row.driver_id,
+      taxYear: row.tax_year,
+      quarter: row.quarter,
+      amount: Number(row.amount),
+      currency: row.currency,
+      paidAt: Number(row.paid_at),
+    };
+  }
+
+  return {
+    async insert(record) {
+      await sql`
+        INSERT INTO estimated_payments (id, driver_id, tax_year, quarter, amount, currency, paid_at)
+        VALUES (${record.id}, ${record.driverId}, ${record.taxYear}, ${record.quarter}, ${record.amount}, ${record.currency}, ${record.paidAt})
+      `;
+    },
+    async listByDriver(driverId, filter = {}) {
+      if (filter.taxYear !== undefined && filter.quarter !== undefined) {
+        const rows = await sql`
+          SELECT * FROM estimated_payments
+          WHERE driver_id = ${driverId} AND tax_year = ${filter.taxYear} AND quarter = ${filter.quarter}
+          ORDER BY paid_at ASC
+        `;
+        return rows.map(fromRow);
+      }
+      if (filter.taxYear !== undefined) {
+        const rows = await sql`
+          SELECT * FROM estimated_payments WHERE driver_id = ${driverId} AND tax_year = ${filter.taxYear} ORDER BY paid_at ASC
+        `;
+        return rows.map(fromRow);
+      }
+      if (filter.quarter !== undefined) {
+        const rows = await sql`
+          SELECT * FROM estimated_payments WHERE driver_id = ${driverId} AND quarter = ${filter.quarter} ORDER BY paid_at ASC
+        `;
+        return rows.map(fromRow);
+      }
+      const rows = await sql`SELECT * FROM estimated_payments WHERE driver_id = ${driverId} ORDER BY paid_at ASC`;
+      return rows.map(fromRow);
+    },
+  };
+}
+
 /**
  * Create the estimated payment tracker.
  * @param {object} [config]
- * @param {Map} [config.store] Per-driver payment store (defaults in-memory).
+ * @param {{insert:Function, listByDriver:Function}} [config.repo] Payment repo (defaults to an in-memory one).
  * @param {() => number} [config.now] Clock in ms (injectable for tests).
  * @param {() => string} [config.generateId] Payment id generator.
  */
 export function createEstimatedPaymentTracker(config = {}) {
   const {
-    store = new Map(),
+    repo = createInMemoryEstimatedPaymentRepo(),
     now = () => Date.now(),
     generateId = () => `pmt_${randomUUID()}`,
   } = config;
-
-  function requireDriverPayments(driverId) {
-    if (!driverId) {
-      throw new EstimatedPaymentError('A driverId is required', 'PAYMENT_DRIVER');
-    }
-    let payments = store.get(driverId);
-    if (!payments) {
-      payments = new Map();
-      store.set(driverId, payments);
-    }
-    return payments;
-  }
 
   function snapshot(record) {
     return deepFreeze(structuredClone(record));
@@ -162,10 +230,12 @@ export function createEstimatedPaymentTracker(config = {}) {
    * @param {number} input.amount
    * @param {string} input.currency ISO 4217 code.
    * @param {number} [input.paidAt] Timestamp override (ms since epoch).
-   * @returns {object} The stored, frozen payment record.
+   * @returns {Promise<object>} The stored, frozen payment record.
    */
-  function recordPayment(driverId, input = {}) {
-    const payments = requireDriverPayments(driverId);
+  async function recordPayment(driverId, input = {}) {
+    if (!driverId) {
+      throw new EstimatedPaymentError('A driverId is required', 'PAYMENT_DRIVER');
+    }
     if (!Number.isInteger(input.taxYear)) {
       throw new EstimatedPaymentError('taxYear must be an integer', 'PAYMENT_TAX_YEAR');
     }
@@ -183,7 +253,7 @@ export function createEstimatedPaymentTracker(config = {}) {
       currency,
       paidAt: input.paidAt ?? now(),
     };
-    payments.set(record.id, record);
+    await repo.insert(record);
     return snapshot(record);
   }
 
@@ -195,19 +265,16 @@ export function createEstimatedPaymentTracker(config = {}) {
    * @param {number} [filter.taxYear]
    * @param {string} [filter.quarter]
    */
-  function listPayments(driverId, filter = {}) {
-    const payments = store.get(driverId);
-    if (!payments) return [];
-    let records = [...payments.values()].sort((a, b) => a.paidAt - b.paidAt);
-    if (filter.taxYear !== undefined) records = records.filter((r) => r.taxYear === filter.taxYear);
-    if (filter.quarter !== undefined) records = records.filter((r) => r.quarter === filter.quarter);
+  async function listPayments(driverId, filter = {}) {
+    const records = await repo.listByDriver(driverId, filter);
     return records.map(snapshot);
   }
 
   /** Total amount paid for a tax year/quarter (assumes a single currency; no conversion is performed). */
-  function totalPaid(driverId, taxYear, quarter) {
-    return listPayments(driverId, { taxYear, quarter }).reduce((sum, r) => sum + r.amount, 0);
+  async function totalPaid(driverId, taxYear, quarter) {
+    const records = await listPayments(driverId, { taxYear, quarter });
+    return records.reduce((sum, r) => sum + r.amount, 0);
   }
 
-  return { recordPayment, listPayments, totalPaid, store };
+  return { recordPayment, listPayments, totalPaid, repo };
 }

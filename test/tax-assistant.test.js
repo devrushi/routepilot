@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { createTaxAssistant, createMockLlmProvider, assembleContext } from '../src/tax-assistant.js';
 import { createExpenseTracker } from '../src/expenses.js';
 
-test('assembleContext resolves the authority and summarizes categorized expenses', () => {
+test('assembleContext resolves the authority and summarizes categorized expenses', async () => {
   const tracker = createExpenseTracker({ now: () => 1_700_000_000_000 });
-  const phone = tracker.categorize('drv_1', { category: 'phone_data', amount: 40, currency: 'USD', jurisdiction: 'US' });
-  const fuel = tracker.categorize('drv_1', { category: 'fuel', amount: 60, currency: 'USD', jurisdiction: 'US' });
+  const phone = await tracker.categorize('drv_1', { category: 'phone_data', amount: 40, currency: 'USD', jurisdiction: 'US' });
+  const fuel = await tracker.categorize('drv_1', { category: 'fuel', amount: 60, currency: 'USD', jurisdiction: 'US' });
 
   const context = assembleContext({ expenses: [phone, fuel] });
   assert.equal(context.authority, 'IRS');
@@ -24,7 +24,7 @@ test('assembleContext falls back to an explicit jurisdiction when there are no e
 
 test('answerQuestion assembles context and returns a mocked LLM response', async () => {
   const tracker = createExpenseTracker({ now: () => 1_700_000_000_000 });
-  const phone = tracker.categorize('drv_1', { category: 'phone_data', amount: 40, currency: 'USD', jurisdiction: 'US' });
+  const phone = await tracker.categorize('drv_1', { category: 'phone_data', amount: 40, currency: 'USD', jurisdiction: 'US' });
 
   const llmProvider = createMockLlmProvider({ reply: 'Yes — the business-use portion of your phone bill is deductible.' });
   const assistant = createTaxAssistant({ llmProvider, expenseTracker: tracker });
@@ -40,7 +40,7 @@ test('answerQuestion assembles context and returns a mocked LLM response', async
   assert.equal(result.messages[0].role, 'system');
   assert.match(result.messages[1].content, /Can I deduct my phone bill\?/);
   assert.match(result.messages[1].content, /Phone & data plan/);
-  assert.deepEqual(tracker.list('drv_1').map((e) => e.id), [phone.id]);
+  assert.deepEqual((await tracker.list('drv_1')).map((e) => e.id), [phone.id]);
 });
 
 test('answerQuestion uses the reply function form for dynamic mocked responses', async () => {

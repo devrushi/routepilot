@@ -6,21 +6,21 @@ function makeProcessor(nowRef, ocrProvider) {
   return createReceiptProcessor({ now: () => nowRef.value, ocrProvider });
 }
 
-test('queue accepts an upload and stores it as queued', () => {
+test('queue accepts an upload and stores it as queued', async () => {
   const nowRef = { value: 1_700_000_000_000 };
   const processor = makeProcessor(nowRef);
-  const receipt = processor.queue('drv_1', { path: '/uploads/r1.jpg', mimeType: 'image/jpeg' });
+  const receipt = await processor.queue('drv_1', { path: '/uploads/r1.jpg', mimeType: 'image/jpeg' });
   assert.equal(receipt.status, 'queued');
   assert.equal(receipt.queuedAt, nowRef.value);
   assert.equal(receipt.fields, null);
-  assert.equal(processor.list('drv_1').length, 1);
-  assert.equal(processor.list('drv_1', { status: 'queued' }).length, 1);
+  assert.equal((await processor.list('drv_1')).length, 1);
+  assert.equal((await processor.list('drv_1', { status: 'queued' })).length, 1);
 });
 
-test('queue rejects an upload with neither buffer nor path', () => {
+test('queue rejects an upload with neither buffer nor path', async () => {
   const nowRef = { value: 1_700_000_000_000 };
   const processor = makeProcessor(nowRef);
-  assert.throws(() => processor.queue('drv_1', {}), (e) => e.code === 'RECEIPT_UPLOAD');
+  await assert.rejects(() => processor.queue('drv_1', {}), (e) => e.code === 'RECEIPT_UPLOAD');
 });
 
 test('process extracts fields from a mocked OCR response with structured fields', async () => {
@@ -31,7 +31,7 @@ test('process extracts fields from a mocked OCR response with structured fields'
     ]),
   });
   const processor = makeProcessor(nowRef, ocrProvider);
-  const receipt = processor.queue('drv_1', { path: '/uploads/r1.jpg' });
+  const receipt = await processor.queue('drv_1', { path: '/uploads/r1.jpg' });
 
   const processed = await processor.process('drv_1', receipt.id);
   assert.equal(processed.status, 'processed');
@@ -47,7 +47,7 @@ test('process falls back to parsing raw text when the provider has no structured
     ]),
   });
   const processor = makeProcessor(nowRef, ocrProvider);
-  const receipt = processor.queue('drv_1', { path: '/uploads/r2.jpg' });
+  const receipt = await processor.queue('drv_1', { path: '/uploads/r2.jpg' });
 
   const processed = await processor.process('drv_1', receipt.id);
   assert.equal(processed.fields.vendor, "Joe's Diner");
@@ -60,25 +60,34 @@ test('a failed OCR call marks the receipt failed instead of throwing', async () 
   const nowRef = { value: 1_700_000_000_000 };
   const ocrProvider = { recognize: async () => { throw new Error('provider unavailable'); } };
   const processor = makeProcessor(nowRef, ocrProvider);
-  const receipt = processor.queue('drv_1', { path: '/uploads/r3.jpg' });
+  const receipt = await processor.queue('drv_1', { path: '/uploads/r3.jpg' });
 
   const processed = await processor.process('drv_1', receipt.id);
   assert.equal(processed.status, 'failed');
   assert.equal(processed.error, 'provider unavailable');
 });
 
+test('process rejects a receipt that is not queued', async () => {
+  const nowRef = { value: 1_700_000_000_000 };
+  const ocrProvider = createMockOcrProvider({ defaultResponse: { text: 'Vendor\nTOTAL $1.00' } });
+  const processor = makeProcessor(nowRef, ocrProvider);
+  const receipt = await processor.queue('drv_1', { path: '/a.jpg' });
+  await processor.process('drv_1', receipt.id);
+  await assert.rejects(() => processor.process('drv_1', receipt.id), (e) => e.code === 'RECEIPT_NOT_QUEUED');
+});
+
 test('processAll drains the FIFO queue across drivers in order', async () => {
   const nowRef = { value: 1_700_000_000_000 };
   const ocrProvider = createMockOcrProvider({ defaultResponse: { text: 'Vendor\nTOTAL $1.00' } });
   const processor = makeProcessor(nowRef, ocrProvider);
-  const a = processor.queue('drv_1', { path: '/a.jpg' });
-  const b = processor.queue('drv_2', { path: '/b.jpg' });
+  const a = await processor.queue('drv_1', { path: '/a.jpg' });
+  const b = await processor.queue('drv_2', { path: '/b.jpg' });
 
   const results = await processor.processAll();
   assert.deepEqual(results.map((r) => r.id), [a.id, b.id]);
-  assert.equal(processor.list('drv_1', { status: 'queued' }).length, 0);
-  assert.equal(processor.get('drv_1', a.id).status, 'processed');
-  assert.equal(processor.get('drv_2', b.id).status, 'processed');
+  assert.equal((await processor.list('drv_1', { status: 'queued' })).length, 0);
+  assert.equal((await processor.get('drv_1', a.id)).status, 'processed');
+  assert.equal((await processor.get('drv_2', b.id)).status, 'processed');
 });
 
 test('extractFields parses currency symbols and prefers provided fields', () => {

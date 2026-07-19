@@ -12,6 +12,9 @@ import { createSessionManager } from './session.js';
 import { createAuthService } from './auth.js';
 import { createShiftTracker, createPostgresShiftRepo } from './shifts.js';
 import { createFuelLogger, createPostgresFuelRepo } from './fuel.js';
+import { createReceiptProcessor, createPostgresReceiptRepo } from './receipts.js';
+import { createExpenseTracker, createPostgresExpenseRepo } from './expenses.js';
+import { createEstimatedPaymentTracker, createPostgresEstimatedPaymentRepo } from './estimated-payments.js';
 import { createDbClient } from './db.js';
 import { createRouter } from './router.js';
 import { sendJson, handleError } from './http-utils.js';
@@ -20,6 +23,9 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerDashboardRoutes } from './routes/dashboard.js';
 import { registerShiftRoutes } from './routes/shifts.js';
 import { registerFuelRoutes } from './routes/fuel.js';
+import { registerReceiptRoutes } from './routes/receipts.js';
+import { registerExpenseRoutes } from './routes/expenses.js';
+import { registerEstimatedPaymentRoutes } from './routes/estimated-payments.js';
 
 export const DEFAULT_PORT = 3000;
 
@@ -62,8 +68,21 @@ function resolveServices(config = {}) {
     }),
     shiftTracker = createShiftTracker({ now, repo: db ? createPostgresShiftRepo(db) : undefined }),
     fuelLogger = createFuelLogger({ now, repo: db ? createPostgresFuelRepo(db) : undefined }),
+    receiptProcessor = createReceiptProcessor({ now, repo: db ? createPostgresReceiptRepo(db) : undefined }),
+    expenseTracker = createExpenseTracker({ now, repo: db ? createPostgresExpenseRepo(db) : undefined }),
+    paymentTracker = createEstimatedPaymentTracker({ now, repo: db ? createPostgresEstimatedPaymentRepo(db) : undefined }),
   } = config;
-  return { now, db, sessionManager, authService, shiftTracker, fuelLogger };
+  return {
+    now,
+    db,
+    sessionManager,
+    authService,
+    shiftTracker,
+    fuelLogger,
+    receiptProcessor,
+    expenseTracker,
+    paymentTracker,
+  };
 }
 
 function buildRouter(services) {
@@ -73,6 +92,9 @@ function buildRouter(services) {
   registerDashboardRoutes(router, services);
   registerShiftRoutes(router, services);
   registerFuelRoutes(router, services);
+  registerReceiptRoutes(router, services);
+  registerExpenseRoutes(router, services);
+  registerEstimatedPaymentRoutes(router, services);
   return router;
 }
 
@@ -112,6 +134,9 @@ export function createRequestHandler(config = {}) {
  * @param {ReturnType<import('./auth.js').createAuthService>} [config.authService]
  * @param {ReturnType<import('./shifts.js').createShiftTracker>} [config.shiftTracker]
  * @param {ReturnType<import('./fuel.js').createFuelLogger>} [config.fuelLogger]
+ * @param {ReturnType<import('./receipts.js').createReceiptProcessor>} [config.receiptProcessor]
+ * @param {ReturnType<import('./expenses.js').createExpenseTracker>} [config.expenseTracker]
+ * @param {ReturnType<import('./estimated-payments.js').createEstimatedPaymentTracker>} [config.paymentTracker]
  * @returns {import('node:http').Server}
  */
 export function createServer(config = {}) {

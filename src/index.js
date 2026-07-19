@@ -137,6 +137,8 @@ export {
 
 export {
   createReceiptProcessor,
+  createInMemoryReceiptRepo,
+  createPostgresReceiptRepo,
   createMockOcrProvider,
   extractFields,
   ReceiptError,
@@ -144,6 +146,8 @@ export {
 
 export {
   createExpenseTracker,
+  createInMemoryExpenseRepo,
+  createPostgresExpenseRepo,
   bucketFor,
   resolveAuthority,
   EXPENSE_CATEGORIES,
@@ -162,6 +166,8 @@ export {
 
 export {
   createEstimatedPaymentTracker,
+  createInMemoryEstimatedPaymentRepo,
+  createPostgresEstimatedPaymentRepo,
   getQuarterlyDueDates,
   nextDueDate,
   EstimatedPaymentError,
