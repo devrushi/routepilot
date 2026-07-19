@@ -177,3 +177,10 @@ export {
   renderWeeklyProfitChartSvg,
   AnalyticsError,
 } from './analytics.js';
+
+export {
+  reconcileRoute,
+  createPayoutReconciliationWidget,
+  DEFAULT_RECONCILIATION_TOLERANCE,
+  PayoutReconciliationError,
+} from './payout-reconciliation.js';
