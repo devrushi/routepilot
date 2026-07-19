@@ -148,3 +148,10 @@ export {
   cosineSimilarity,
   EmbeddingError,
 } from './embeddings.js';
+
+export {
+  createTaxAssistant,
+  createMockLlmProvider,
+  assembleContext,
+  TaxAssistantError,
+} from './tax-assistant.js';
