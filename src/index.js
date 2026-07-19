@@ -115,3 +115,10 @@ export {
   extractFields,
   ReceiptError,
 } from './receipts.js';
+
+export {
+  createExpenseTracker,
+  bucketFor,
+  EXPENSE_CATEGORIES,
+  ExpenseError,
+} from './expenses.js';
