@@ -86,11 +86,18 @@ function resolveCategory(value) {
   return EXPENSE_CATEGORIES.find((c) => c.id === needle) ?? null;
 }
 
-// Accepts anything that already carries a resolved tax authority: a full
-// declaration from declareTaxResidency() (`{ jurisdiction: { authority } }`),
-// a raw TAX_JURISDICTIONS entry (`{ authority }`), a jurisdiction id/country
-// ('US', 'GB', 'UK'), or the authority itself ('IRS'/'HMRC').
-function resolveAuthority(jurisdiction) {
+/**
+ * Resolve a tax authority ('IRS' or 'HMRC') from anything that already
+ * carries or implies one: a full declaration from declareTaxResidency()
+ * (`{ jurisdiction: { authority } }`), a raw TAX_JURISDICTIONS entry
+ * (`{ authority }`), a jurisdiction id/country ('US', 'GB', 'UK'), or the
+ * authority itself. Shared with tax-estimation.js and other modules that
+ * need to go from "a driver's declared jurisdiction" to "which tax code
+ * applies" without redefining the jurisdiction catalogue.
+ * @param {object|string} jurisdiction
+ * @returns {'IRS'|'HMRC'}
+ */
+export function resolveAuthority(jurisdiction) {
   if (jurisdiction && typeof jurisdiction === 'object') {
     const j = jurisdiction.authority ? jurisdiction : jurisdiction.jurisdiction;
     if (j && j.authority) return j.authority;

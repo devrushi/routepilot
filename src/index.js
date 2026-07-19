@@ -119,6 +119,17 @@ export {
 export {
   createExpenseTracker,
   bucketFor,
+  resolveAuthority,
   EXPENSE_CATEGORIES,
   ExpenseError,
 } from './expenses.js';
+
+export {
+  createTaxEstimator,
+  computeProgressiveTax,
+  US_FEDERAL_BRACKETS_2024,
+  US_STANDARD_DEDUCTION_2024,
+  GB_INCOME_TAX_BANDS_2024,
+  DEFAULT_JURISDICTION_TAX_CONFIG,
+  TaxEstimationError,
+} from './tax-estimation.js';
