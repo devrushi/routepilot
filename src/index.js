@@ -96,7 +96,7 @@ export {
   RouteSyncError,
 } from './route-sync.js';
 
-export { createServer, DEFAULT_PORT } from './server.js';
+export { createServer, createRequestHandler, DEFAULT_PORT } from './server.js';
 
 export { createShiftTracker, ShiftError } from './shifts.js';
 

@@ -27,6 +27,54 @@ const AUTH_ERROR_STATUS = {
   AUTH_USER_NOT_FOUND: 404,
 };
 
+// Dev-only fallback secrets so the server is runnable out of the box locally
+// and in tests. Set SESSION_ACCESS_SECRET / SESSION_REFRESH_SECRET /
+// AUTH_CHALLENGE_SECRET in any real deployment — these fallbacks are public
+// (checked into this repo), so leaving them in place lets anyone forge
+// sessions. Warns (not throws) so `npm start`/tests keep working unchanged.
+const DEV_FALLBACK_SECRETS = {
+  SESSION_ACCESS_SECRET: 'dev-only-access-secret-change-me',
+  SESSION_REFRESH_SECRET: 'dev-only-refresh-secret-change-me',
+  AUTH_CHALLENGE_SECRET: 'dev-only-challenge-secret-change-me',
+};
+
+function envSecret(name) {
+  const value = process.env[name];
+  if (value) return value;
+  console.warn(`[routepilot] ${name} is not set — using an insecure, publicly-known dev fallback. Set it before deploying anywhere real.`);
+  return DEV_FALLBACK_SECRETS[name];
+}
+
+function resolveServices(config = {}) {
+  const {
+    now = () => Date.now(),
+    sessionManager = createSessionManager({
+      accessSecret: envSecret('SESSION_ACCESS_SECRET'),
+      refreshSecret: envSecret('SESSION_REFRESH_SECRET'),
+      now,
+    }),
+    authService = createAuthService({
+      sessionManager,
+      challengeSecret: envSecret('AUTH_CHALLENGE_SECRET'),
+      now,
+    }),
+  } = config;
+  return { now, sessionManager, authService };
+}
+
+/**
+ * Build the RoutePilot request handler: `(req, res) => Promise<void>`,
+ * compatible with both Node's `http.createServer` and Vercel/most other
+ * Node serverless runtimes (they pass through standard
+ * `IncomingMessage`/`ServerResponse`-shaped objects). Use this directly for
+ * a serverless deployment; use {@link createServer} to also get a listening
+ * `http.Server` for local/traditional hosting.
+ * @param {object} [config] See {@link createServer}.
+ */
+export function createRequestHandler(config = {}) {
+  return requestListener(resolveServices(config));
+}
+
 /**
  * Create (but do not start) the RoutePilot HTTP server.
  * @param {object} [config]
@@ -36,24 +84,7 @@ const AUTH_ERROR_STATUS = {
  * @returns {import('node:http').Server}
  */
 export function createServer(config = {}) {
-  const {
-    now = () => Date.now(),
-    // Dev-only fallback secrets so the server is runnable out of the box.
-    // Set SESSION_ACCESS_SECRET / SESSION_REFRESH_SECRET / AUTH_CHALLENGE_SECRET
-    // in any real deployment.
-    sessionManager = createSessionManager({
-      accessSecret: process.env.SESSION_ACCESS_SECRET || 'dev-only-access-secret-change-me',
-      refreshSecret: process.env.SESSION_REFRESH_SECRET || 'dev-only-refresh-secret-change-me',
-      now,
-    }),
-    authService = createAuthService({
-      sessionManager,
-      challengeSecret: process.env.AUTH_CHALLENGE_SECRET || 'dev-only-challenge-secret-change-me',
-      now,
-    }),
-  } = config;
-
-  return createHttpServer(requestListener({ now, sessionManager, authService }));
+  return createHttpServer(createRequestHandler(config));
 }
 
 function requestListener({ now, sessionManager, authService }) {
