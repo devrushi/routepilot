@@ -184,3 +184,11 @@ export {
   DEFAULT_RECONCILIATION_TOLERANCE,
   PayoutReconciliationError,
 } from './payout-reconciliation.js';
+
+export {
+  generateExpenseCsv,
+  generateMileageCsv,
+  generateTaxExportPdf,
+  renderPdf,
+  ExportError,
+} from './exports.js';
