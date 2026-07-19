@@ -140,3 +140,11 @@ export {
   nextDueDate,
   EstimatedPaymentError,
 } from './estimated-payments.js';
+
+export {
+  createVectorStore,
+  createDriverPatternIndex,
+  createMockEmbeddingProvider,
+  cosineSimilarity,
+  EmbeddingError,
+} from './embeddings.js';
