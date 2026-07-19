@@ -173,3 +173,33 @@ test('GET /dashboard rejects an invalid session token', async () => {
     assert.equal(res.status, 401);
   });
 });
+
+test('POST /dashboard/weekly-profit returns bucketed data and an SVG chart for a valid session', async () => {
+  await withServer(async (baseUrl) => {
+    const login = await registerAndLogin(baseUrl);
+    const res = await fetch(`${baseUrl}/dashboard/weekly-profit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${login.tokens.accessToken}` },
+      body: JSON.stringify({
+        earnings: [{ at: Date.UTC(2024, 0, 2), amount: 100 }],
+        expenses: [{ at: Date.UTC(2024, 0, 2), amount: 30 }],
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.buckets.length, 1);
+    assert.equal(body.buckets[0].net, 70);
+    assert.match(body.svg, /^<svg /);
+  });
+});
+
+test('POST /dashboard/weekly-profit rejects a missing session token', async () => {
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/dashboard/weekly-profit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ earnings: [], expenses: [] }),
+    });
+    assert.equal(res.status, 401);
+  });
+});

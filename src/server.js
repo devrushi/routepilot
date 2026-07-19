@@ -8,6 +8,7 @@
 import { createServer as createHttpServer } from 'node:http';
 import { createSessionManager } from './session.js';
 import { createAuthService, AuthError } from './auth.js';
+import { bucketWeeklyProfit, renderWeeklyProfitChartSvg, AnalyticsError } from './analytics.js';
 
 export const DEFAULT_PORT = 3000;
 
@@ -96,6 +97,11 @@ function requestListener({ now, sessionManager, authService }) {
         return;
       }
 
+      if (method === 'POST' && pathname === '/dashboard/weekly-profit') {
+        await handleWeeklyProfit(req, res, { sessionManager });
+        return;
+      }
+
       sendJson(res, 404, { error: 'Not Found' });
     } catch (err) {
       handleError(res, err);
@@ -103,20 +109,26 @@ function requestListener({ now, sessionManager, authService }) {
   };
 }
 
-async function handleDashboard(req, res, { sessionManager, authService }) {
+// Verifies the request's bearer token, sending a 401 itself on
+// missing/invalid tokens. Returns the access-token payload, or `null` (the
+// caller should just return — the response is already sent).
+function requireSession(req, res, sessionManager) {
   const token = bearerToken(req);
   if (!token) {
     sendJson(res, 401, { error: 'Missing session token' });
-    return;
+    return null;
   }
-
-  let payload;
   try {
-    payload = sessionManager.verifyAccess(token);
+    return sessionManager.verifyAccess(token);
   } catch {
     sendJson(res, 401, { error: 'Invalid or expired session' });
-    return;
+    return null;
   }
+}
+
+async function handleDashboard(req, res, { sessionManager, authService }) {
+  const payload = requireSession(req, res, sessionManager);
+  if (!payload) return;
 
   const user = await authService.userStore.findById(payload.sub);
   if (!user) {
@@ -125,6 +137,20 @@ async function handleDashboard(req, res, { sessionManager, authService }) {
   }
 
   sendJson(res, 200, { profile: buildProfile(user) });
+}
+
+// Accepts { earnings, expenses } (each `[{ at, amount }]`) and returns the
+// weekly gross/net buckets plus a rendered SVG chart. Earnings/expenses
+// aren't persisted anywhere yet in this repo, so the caller supplies them
+// directly rather than this route looking them up itself.
+async function handleWeeklyProfit(req, res, { sessionManager }) {
+  const payload = requireSession(req, res, sessionManager);
+  if (!payload) return;
+
+  const { earnings = [], expenses = [] } = await readJsonBody(req);
+  const buckets = bucketWeeklyProfit({ earnings, expenses });
+  const svg = renderWeeklyProfitChartSvg(buckets);
+  sendJson(res, 200, { buckets, svg });
 }
 
 function buildProfile(user) {
@@ -175,7 +201,7 @@ function handleError(res, err) {
     sendJson(res, AUTH_ERROR_STATUS[err.code] ?? 400, { error: err.message, code: err.code });
     return;
   }
-  if (err instanceof BodyError) {
+  if (err instanceof BodyError || err instanceof AnalyticsError) {
     sendJson(res, 400, { error: err.message });
     return;
   }

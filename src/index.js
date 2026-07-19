@@ -171,3 +171,9 @@ export {
   DEFAULT_RECEIPT_WINDOW_MS,
   NotificationError,
 } from './notifications.js';
+
+export {
+  bucketWeeklyProfit,
+  renderWeeklyProfitChartSvg,
+  AnalyticsError,
+} from './analytics.js';
