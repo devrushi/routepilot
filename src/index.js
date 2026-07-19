@@ -108,3 +108,10 @@ export {
   BASE_CURRENCY,
   FuelError,
 } from './fuel.js';
+
+export {
+  createReceiptProcessor,
+  createMockOcrProvider,
+  extractFields,
+  ReceiptError,
+} from './receipts.js';
